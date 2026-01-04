@@ -1,0 +1,23 @@
+{
+  "name": "pm-assistant",
+  "version": "1.0.0",
+  "description": "PM Intelligence Assistant - ADO and YouTrack crawler with AI analysis",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "start:ado": "node server.js",
+    "start:youtrack": "node youtrack.js",
+    "dev:ado": "node --watch server.js",
+    "dev:youtrack": "node --watch youtrack.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.2",
+    "axios": "^1.13.2",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1"
+  }
+}
