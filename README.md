@@ -65,4 +65,3 @@ node youtrack.js
 ## License
 
 ISC
-
