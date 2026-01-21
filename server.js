@@ -4,7 +4,8 @@ const axios = require('axios');
 const Anthropic = require('@anthropic-ai/sdk');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 const ADO_PAT = process.env.ADO_PAT;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
