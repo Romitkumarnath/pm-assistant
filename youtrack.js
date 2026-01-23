@@ -867,10 +867,341 @@ QUESTION: ${req.body.question}`;
   }
 });
 
+// Function to format analysis as Google Chat card message
+function formatGoogleChatMessage(analysis, data, issueId, baseUrl) {
+  const overview = analysis.projectOverview || {};
+  const metrics = analysis.metrics || {};
+  const issueUrl = `${baseUrl}/issue/${issueId}`;
+  
+  // Build sections for the card
+  const sections = [];
+  
+  // Section 1: Header and Stats
+  const headerWidgets = [];
+  
+  // Project header
+  headerWidgets.push({
+    keyValue: {
+      topLabel: 'Project',
+      content: overview.name || `Issue ${issueId}`,
+      contentMultiline: false,
+      icon: 'DESCRIPTION',
+      button: {
+        textButton: {
+          text: 'VIEW ISSUE',
+          onClick: {
+            openLink: {
+              url: issueUrl
+            }
+          }
+        }
+      }
+    }
+  });
+  
+  // Status
+  if (overview.status) {
+    headerWidgets.push({
+      keyValue: {
+        topLabel: 'Status',
+        content: overview.status,
+        contentMultiline: false,
+        icon: 'STAR'
+      }
+    });
+  }
+  
+  // Stats grid
+  const statsText = [
+    `${metrics.total || 0} Total`,
+    `${metrics.completed || 0} Done`,
+    `${metrics.inProgress || 0} In Progress`,
+    `${metrics.notStarted || 0} Not Started`,
+    `${metrics.blocked || 0} Blocked`,
+    `${metrics.completionRate || 'N/A'} Rate`,
+    `${metrics.totalComments || 0} Comments`,
+    `${metrics.relatedItemsCount || 0} Related`
+  ].join(' | ');
+  
+  headerWidgets.push({
+    textParagraph: {
+      text: '<b>📊 Stats</b>\n' + statsText
+    }
+  });
+  
+  sections.push({ widgets: headerWidgets });
+  
+  // Section 2: Executive Summary
+  if (analysis.executiveSummary) {
+    const summaryText = analysis.executiveSummary.length > 1000 
+      ? analysis.executiveSummary.substring(0, 1000) + '...' 
+      : analysis.executiveSummary;
+    
+    sections.push({
+      widgets: [{
+        textParagraph: {
+          text: '<b>📋 Executive Summary</b>\n' + summaryText.replace(/\n\n+/g, '\n').replace(/\n/g, ' ')
+        }
+      }]
+    });
+  }
+  
+  // Section 3: Key Decisions
+  if (analysis.keyDecisions && analysis.keyDecisions.length > 0) {
+    const decisions = analysis.keyDecisions.map((d, i) => 
+      `${i + 1}. ${d.decision}${d.madeBy ? ' (by ' + d.madeBy + ')' : ''}${d.ticketId ? ' - ' + d.ticketId : ''}`
+    ).join('\n');
+    
+    sections.push({
+      widgets: [{
+        textParagraph: {
+          text: '<b>🎯 Key Decisions</b>\n' + decisions
+        }
+      }]
+    });
+  }
+  
+  // Section 4: Discussion Highlights
+  if (analysis.discussionHighlights && analysis.discussionHighlights.length > 0) {
+    const highlights = analysis.discussionHighlights.map((h, i) => 
+      `${i + 1}. <b>${h.topic}</b>: ${h.summary}${h.participants ? ' (Participants: ' + h.participants + ')' : ''}${h.ticketId ? ' - ' + h.ticketId : ''}`
+    ).join('\n\n');
+    
+    sections.push({
+      widgets: [{
+        textParagraph: {
+          text: '<b>💭 Discussion Highlights</b>\n' + highlights
+        }
+      }]
+    });
+  }
+  
+  // Section 5: Team Contributions
+  if (analysis.teamContributions && analysis.teamContributions.length > 0) {
+    const teamContribs = analysis.teamContributions.map(t => {
+      const ticketCount = (t.ticketsCompleted || []).length;
+      const commentCount = t.commentCount || 0;
+      const tickets = (t.ticketsCompleted || []).slice(0, 5).join(', ');
+      const moreTickets = ticketCount > 5 ? ` +${ticketCount - 5} more` : '';
+      return `<b>${t.person}</b>: ${ticketCount} tickets, ${commentCount} comments${tickets ? ' (' + tickets + moreTickets + ')' : ''}`
+    }).join('\n');
+    
+    sections.push({
+      widgets: [{
+        textParagraph: {
+          text: '<b>👥 Team Contributions</b>\n' + teamContribs
+        }
+      }]
+    });
+  }
+  
+  // Section 6: Work Breakdown
+  if (analysis.workBreakdown && analysis.workBreakdown.length > 0) {
+    const workBreakdown = analysis.workBreakdown.map(w => {
+      const ticketList = (w.tickets || []).slice(0, 5).map(t => `${t.id}: ${t.title.substring(0, 40)}${t.title.length > 40 ? '...' : ''}`).join('\n  ');
+      const moreTickets = (w.tickets || []).length > 5 ? `\n  ... and ${(w.tickets || []).length - 5} more` : '';
+      return `<b>${w.category}</b> (${w.status || 'N/A'})\n  ${ticketList}${moreTickets}`;
+    }).join('\n\n');
+    
+    sections.push({
+      widgets: [{
+        textParagraph: {
+          text: '<b>📁 Work Breakdown</b>\n' + workBreakdown
+        }
+      }]
+    });
+  }
+  
+  // Section 7: Dependencies
+  if (analysis.dependencies && analysis.dependencies.length > 0) {
+    const dependencies = analysis.dependencies.map(d => {
+      const ticketLink = d.relatedTicketId ? ` - ${d.relatedTicketId}` : '';
+      return `• ${d.dependency} (${d.type || 'N/A'}) - ${d.status || 'N/A'}${d.owner ? ' - Owner: ' + d.owner : ''}${ticketLink}`;
+    }).join('\n');
+    
+    sections.push({
+      widgets: [{
+        textParagraph: {
+          text: '<b>🔗 Dependencies</b>\n' + dependencies
+        }
+      }]
+    });
+  }
+  
+  // Section 8: Risks
+  if (analysis.risks && analysis.risks.length > 0) {
+    const risks = analysis.risks.map(r => {
+      return `• <b>${r.risk}</b> (${r.likelihood || 'Unknown'} likelihood, ${r.impact || 'Unknown'} impact)${r.owner ? ' - Owner: ' + r.owner : ''}${r.sourceTicketId ? ' - ' + r.sourceTicketId : ''}`;
+    }).join('\n');
+    
+    sections.push({
+      widgets: [{
+        textParagraph: {
+          text: '<b>⚠️ Risks</b>\n' + risks
+        }
+      }]
+    });
+  }
+  
+  // Section 9: Blockers
+  if (analysis.blockers && analysis.blockers.length > 0) {
+    const blockers = analysis.blockers.map(b => {
+      const ticketInfo = b.ticket ? ` - Ticket: ${b.ticket}` : '';
+      const resolution = b.resolution ? `\n  Resolution: ${b.resolution}` : '';
+      return `• ${b.blocker}${ticketInfo}${resolution}`;
+    }).join('\n');
+    
+    sections.push({
+      widgets: [{
+        textParagraph: {
+          text: '<b>🚫 Blockers</b>\n' + blockers
+        }
+      }]
+    });
+  }
+  
+  // Section 10: Next Steps
+  if (analysis.nextSteps && analysis.nextSteps.length > 0) {
+    const nextSteps = analysis.nextSteps.map((n, i) => 
+      `${i + 1}. ${n.action} (${n.owner || 'Unassigned'}) - ${n.priority || 'Normal'}`
+    ).join('\n');
+    
+    sections.push({
+      widgets: [{
+        textParagraph: {
+          text: '<b>➡️ Next Steps</b>\n' + nextSteps
+        }
+      }]
+    });
+  }
+  
+  // Section 11: All Tickets with Links
+  const ticketWidgets = [];
+  
+  // Add parent ticket with link
+  if (data.parent) {
+    ticketWidgets.push({
+      keyValue: {
+        topLabel: 'Parent Ticket',
+        content: `${data.parent.id}: ${data.parent.title.substring(0, 50)}${data.parent.title.length > 50 ? '...' : ''}`,
+        contentMultiline: false,
+        icon: 'DESCRIPTION',
+        button: {
+          textButton: {
+            text: 'VIEW',
+            onClick: {
+              openLink: {
+                url: `${baseUrl}/issue/${data.parent.id}`
+              }
+            }
+          }
+        }
+      }
+    });
+  }
+  
+  // Add child tickets (up to 10 with buttons, rest as text)
+  if (data.children && data.children.length > 0) {
+    const childrenToShow = data.children.slice(0, 10);
+    const remainingCount = data.children.length - 10;
+    
+    childrenToShow.forEach(child => {
+      ticketWidgets.push({
+        keyValue: {
+          topLabel: child.state || 'Unknown',
+          content: `${child.id}: ${child.title.substring(0, 50)}${child.title.length > 50 ? '...' : ''}`,
+          contentMultiline: false,
+          button: {
+            textButton: {
+              text: 'VIEW',
+              onClick: {
+                openLink: {
+                  url: `${baseUrl}/issue/${child.id}`
+                }
+              }
+            }
+          }
+        }
+      });
+    });
+    
+    if (remainingCount > 0) {
+      const remainingTickets = data.children.slice(10).map(c => 
+        `${c.id}: ${c.title.substring(0, 40)}${c.title.length > 40 ? '...' : ''} (${c.state || 'Unknown'})`
+      ).join('\n');
+      
+      ticketWidgets.push({
+        textParagraph: {
+          text: `<b>... and ${remainingCount} more tickets:</b>\n${remainingTickets.substring(0, 500)}${remainingTickets.length > 500 ? '...' : ''}`
+        }
+      });
+    }
+  }
+  
+  if (ticketWidgets.length > 0) {
+    sections.push({
+      widgets: [
+        {
+          textParagraph: {
+            text: '<b>📄 All Tickets</b>'
+          }
+        },
+        ...ticketWidgets
+      ]
+    });
+  }
+  
+  // Footer button
+  sections.push({
+    widgets: [{
+      buttons: [{
+        textButton: {
+          text: 'View Full Analysis in YouTrack',
+          onClick: {
+            openLink: {
+              url: issueUrl
+            }
+          }
+        }
+      }]
+    }]
+  });
+  
+  return {
+    cards: [{
+      header: {
+        title: overview.name || `Project Analysis: ${issueId}`,
+        subtitle: overview.status || 'Analysis Complete',
+        imageUrl: 'https://www.gstatic.com/images/icons/material/system/1x/description_googblue_24dp.png',
+        imageStyle: 'IMAGE'
+      },
+      sections: sections
+    }]
+  };
+}
+
+// Function to send message to Google Chat webhook
+async function sendToGoogleChat(webhookUrl, message) {
+  try {
+    console.log('Sending message to Google Chat webhook...');
+    const response = await axios.post(webhookUrl, message, {
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+    console.log('Message sent successfully to Google Chat');
+    return { success: true, response: response.data };
+  } catch (error) {
+    console.error('Error sending to Google Chat:', error.response?.data || error.message);
+    return { success: false, error: error.message };
+  }
+}
+
 app.post('/api/analyze', async function(req, res) {
   try {
     console.log('\n=== NEW ANALYSIS REQUEST ===');
     console.log('Has chatExport in request:', !!req.body.chatExport);
+    console.log('Has webhookUrl in request:', !!req.body.webhookUrl);
     if (req.body.chatExport) {
       console.log('ChatExport length:', req.body.chatExport.length, 'characters');
     }
@@ -912,7 +1243,20 @@ app.post('/api/analyze', async function(req, res) {
     // Add to history
     const historyId = addToHistory(parsed.issueId, req.body.url, data, analysis);
     
-    res.json({ tickets: data, analysis: analysis, historyId: historyId });
+    // Send to Google Chat if webhook URL provided
+    let chatResult = null;
+    if (req.body.webhookUrl && req.body.webhookUrl.trim()) {
+      const chatMessage = formatGoogleChatMessage(analysis, data, parsed.issueId, parsed.baseUrl);
+      chatResult = await sendToGoogleChat(req.body.webhookUrl.trim(), chatMessage);
+    }
+    
+    res.json({ 
+      tickets: data, 
+      analysis: analysis, 
+      historyId: historyId,
+      chatSent: chatResult ? chatResult.success : false,
+      chatError: chatResult && !chatResult.success ? chatResult.error : null
+    });
   } catch (e) {
     console.error('Analysis error:', e);
     res.status(500).json({ error: e.message });
@@ -1499,16 +1843,20 @@ async function run() {
   if (!url) return alert("Enter YouTrack URL");
   
   var chatExport = document.getElementById("chatExport").value.trim();
+  var webhookUrl = document.getElementById("webhookUrl").value.trim();
   
   console.log('=== BROWSER DEBUG ===');
   console.log('URL:', url);
   console.log('Chat export length:', chatExport.length, 'characters');
+  console.log('Webhook URL:', webhookUrl ? 'Provided' : 'Not provided');
   console.log('First 100 chars of chat:', chatExport.substring(0, 100));
   console.log('=====================');
   
   document.getElementById("btn").disabled = true;
   document.getElementById("btn").textContent = "Crawling...";
-  document.getElementById("status").textContent = "Fetching tickets, comments" + (chatExport ? ", and parsing Google Chat export" : "") + "...";
+  var statusMsg = "Fetching tickets, comments" + (chatExport ? ", and parsing Google Chat export" : "") + "...";
+  if (webhookUrl) statusMsg += " Will send summary to Google Chat when complete.";
+  document.getElementById("status").textContent = statusMsg;
   document.getElementById("results").innerHTML = "";
   document.getElementById("chatBox").classList.add("hidden");
   document.getElementById("chatLog").innerHTML = "";
@@ -1518,7 +1866,11 @@ async function run() {
     var res = await fetch("/api/analyze", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ url: url, chatExport: chatExport || undefined })
+      body: JSON.stringify({ 
+        url: url, 
+        chatExport: chatExport || undefined,
+        webhookUrl: webhookUrl || undefined
+      })
     });
     var d = await res.json();
     if (d.error) throw new Error(d.error);
@@ -1526,7 +1878,15 @@ async function run() {
     DATA = d;
     BASE = d.tickets.baseUrl;
     var stats = d.tickets.stats || {};
-    document.getElementById("status").textContent = "Done! " + (d.tickets.children.length + 1) + " tickets, " + (stats.totalComments || 0) + " comments, " + (stats.totalRelated || 0) + " related, " + (stats.totalDependencies || 0) + " dependencies";
+    var statusText = "Done! " + (d.tickets.children.length + 1) + " tickets, " + (stats.totalComments || 0) + " comments, " + (stats.totalRelated || 0) + " related, " + (stats.totalDependencies || 0) + " dependencies";
+    if (d.chatSent) {
+      statusText += " ✅ Message sent to Google Chat!";
+    } else if (d.chatError) {
+      statusText += " ⚠️ Google Chat error: " + d.chatError;
+    } else if (webhookUrl) {
+      statusText += " (No webhook URL provided)";
+    }
+    document.getElementById("status").textContent = statusText;
     document.getElementById("chatBox").classList.remove("hidden");
     
     renderAnalysis(d);
@@ -1575,6 +1935,11 @@ app.get('/', function(req, res) {
           <label class="block text-sm font-medium mb-2 text-slate-300">Google Chat Export (optional)</label>
           <textarea id="chatExport" placeholder="Paste your Google Chat export here..." class="w-full bg-slate-700 rounded-lg p-3 border border-slate-600 h-32 text-sm font-mono" style="resize: vertical;"></textarea>
           <div class="text-xs text-slate-500 mt-1">Tip: Export your chat conversation and paste it here. The tool will automatically detect ticket IDs and correlate discussions with tickets.</div>
+        </div>
+        <div class="mb-3">
+          <label class="block text-sm font-medium mb-2 text-slate-300">Google Chat Webhook URL (optional)</label>
+          <input type="text" id="webhookUrl" placeholder="https://chat.googleapis.com/v1/spaces/..." class="w-full bg-slate-700 rounded-lg p-3 border border-slate-600 text-sm font-mono" value="https://chat.googleapis.com/v1/spaces/AAQAvpwMxHw/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=PflqgfVy7hhfJVSXXoXmiXDf6VJpptBn3ZSdeta2B00">
+          <div class="text-xs text-slate-500 mt-1">Enter a Google Chat webhook URL to send a formatted summary message to the channel after analysis completes.</div>
         </div>
         <button onclick="run()" id="btn" class="w-full py-3 bg-purple-600 hover:bg-purple-500 rounded-lg font-medium">Crawl and Generate Report</button>
         <div id="status" class="mt-3 text-sm text-slate-400"></div>
