@@ -699,6 +699,59 @@ async function crawlYouTrack(baseUrl, issueId) {
   return result;
 }
 
+// Trim data to reduce token usage and avoid rate limits (429)
+const MAX_COMMENT_CHARS = 600;
+const MAX_DESCRIPTION_CHARS = 1500;
+const MAX_CHAT_MSG_CHARS = 400;
+const MAX_COMMENTS_PER_TICKET = 30;
+
+function trimDataForAnalysis(data) {
+  const out = JSON.parse(JSON.stringify(data));
+  function trunc(s, max) {
+    if (typeof s !== 'string') return s;
+    return s.length <= max ? s : s.slice(0, max) + '...[truncated]';
+  }
+  if (out.parent) {
+    if (out.parent.description) out.parent.description = trunc(out.parent.description, MAX_DESCRIPTION_CHARS);
+    if (Array.isArray(out.parent.comments)) {
+      out.parent.comments = out.parent.comments.slice(-MAX_COMMENTS_PER_TICKET).map(function (c) {
+        if (c.text) c.text = trunc(c.text, MAX_COMMENT_CHARS);
+        return c;
+      });
+    }
+  }
+  if (Array.isArray(out.children)) {
+    out.children = out.children.map(function (t) {
+      if (t.description) t.description = trunc(t.description, MAX_DESCRIPTION_CHARS);
+      if (Array.isArray(t.comments)) {
+        t.comments = t.comments.slice(-MAX_COMMENTS_PER_TICKET).map(function (c) {
+          if (c.text) c.text = trunc(c.text, MAX_COMMENT_CHARS);
+          return c;
+        });
+      }
+      return t;
+    });
+  }
+  if (out.allComments && Array.isArray(out.allComments)) {
+    out.allComments = out.allComments.map(function (ic) {
+      if (Array.isArray(ic.comments)) {
+        ic.comments = ic.comments.slice(-MAX_COMMENTS_PER_TICKET).map(function (c) {
+          if (c.text) c.text = trunc(c.text, MAX_COMMENT_CHARS);
+          return c;
+        });
+      }
+      return ic;
+    });
+  }
+  if (out.chatMessages && out.chatMessages.messages && Array.isArray(out.chatMessages.messages)) {
+    out.chatMessages.messages = out.chatMessages.messages.map(function (m) {
+      if (m.text) m.text = trunc(m.text, MAX_CHAT_MSG_CHARS);
+      return m;
+    });
+  }
+  return out;
+}
+
 async function analyze(data) {
   const hasChat = data.chatMessages && data.chatMessages.messages && data.chatMessages.messages.length > 0;
   
@@ -710,6 +763,8 @@ async function analyze(data) {
     console.log('Ticket mentions in chat:', Object.keys(data.chatMessages.ticketMentions || {}).length);
   }
   console.log('===========================');
+  
+  const trimmed = trimDataForAnalysis(data);
   
   const prompt = `You are a Senior TPM creating an executive briefing. Analyze these YouTrack tickets${hasChat ? ' and Google Chat conversations' : ''} including their comments and related items.
 
@@ -793,11 +848,11 @@ Return JSON with:
 - keyAccomplishments (array: accomplishment, ticketIds, impact, team)
 - keyDecisions (array: decision, context, madeBy, ticketId, date, source: "chat" or "ticket") - extracted from comments${hasChat ? ' AND chats' : ''}
 - discussionHighlights (array: topic, summary, participants, ticketId, source: "chat" or "ticket") - key discussion threads from comments${hasChat ? ' AND chats' : ''}
-- workBreakdown (array: category, description, status, tickets array with id/title/state/assignee)
+- workBreakdown (array: category, description, status, tickets array with id/title/state/assignee, date - when category was completed or last updated)
 - teamContributions (array: person, ticketsCompleted as ID array, keyContributions, commentCount${hasChat ? ', chatMessageCount' : ''})
-- dependencies (array: dependency, type, status, owner, impact, relatedTicketId)
-- blockers (array: blocker, ticket, severity, status, resolution, mentionedInComments${hasChat ? ', mentionedInChat' : ''})
-- risks (array: risk, likelihood, impact, mitigation, owner, sourceTicketId)
+- dependencies (array: dependency, type, status, owner, impact, relatedTicketId, date - when dependency was identified or last updated)
+- blockers (array: blocker, ticket, severity, status, resolution, mentionedInComments${hasChat ? ', mentionedInChat' : ''}, date - when blocker was identified or resolved)
+- risks (array: risk, likelihood, impact, mitigation, owner, sourceTicketId, date - when risk was identified or highlighted)
 - relatedWork (array: ticketId, title, relationTypes, status, relevance) - from related items
 - openQuestions (array: question, ticketId, askedBy, source: "chat" or "ticket") - unresolved questions from comments${hasChat ? ' AND chats' : ''}
 ${hasChat ? `- chatDiscussions (array: topic, summary, participants, relatedTickets array with objects {ticketId, matchType: "explicit" or "semantic" or "team" or "temporal" or "topic", confidence: "high" or "medium" or "low", reasoning: string}, mvpCategory: "MVP" or "Post-MVP" or "Undefined", needsTicket: boolean, ticketSuggestion: string if needsTicket is true)
@@ -810,39 +865,82 @@ ${hasChat ? `- chatDiscussions (array: topic, summary, participants, relatedTick
 
 Use ticket IDs (like UNSER-1141). Extract insights from comments${hasChat ? ' and chats' : ''}.
 
-DATA: ${JSON.stringify(data)}`;
+DATA: ${JSON.stringify(trimmed)}`;
 
   console.log('Analyzing with Claude...');
-  const r = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 16000,
-    messages: [{ role: 'user', content: prompt }]
-  });
-  
-  const txt = r.content[0].text;
-  try {
-    // Try to extract JSON from various formats
-    let jsonStr = txt;
-    
-    // Try ```json ... ``` format
-    const jsonBlockMatch = txt.match(/```json\s*([\s\S]*?)\s*```/);
-    if (jsonBlockMatch) {
-      jsonStr = jsonBlockMatch[1];
-    } else {
-      // Try to find JSON object directly
-      const jsonStart = txt.indexOf('{');
-      const jsonEnd = txt.lastIndexOf('}');
-      if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
-        jsonStr = txt.substring(jsonStart, jsonEnd + 1);
+  let lastErr;
+  const maxRetries = 3;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const r = await anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 16000,
+        messages: [{ role: 'user', content: prompt }]
+      });
+      const txt = r.content[0].text;
+      const parsed = extractAnalysisJson(txt);
+      if (parsed) return parsed;
+      console.log('Analysis JSON parse failed. Raw response length:', txt.length);
+      return { raw: txt };
+    } catch (e) {
+      lastErr = e;
+      const is429 = e.status === 429 || (e.message && e.message.includes('429'));
+      if (is429 && attempt < maxRetries) {
+        const waitMs = Math.min(60000, 5000 * Math.pow(2, attempt));
+        console.warn('Rate limit (429). Waiting ' + (waitMs / 1000) + 's before retry ' + (attempt + 1) + '/' + maxRetries + '...');
+        await new Promise(function (resolve) { setTimeout(resolve, waitMs); });
+      } else {
+        throw e;
       }
     }
-    
-    return JSON.parse(jsonStr.trim());
-  } catch (e) { 
-    console.log('Parse error:', e.message);
-    console.log('Raw response length:', txt.length);
   }
-  return { raw: txt };
+  throw lastErr;
+}
+
+// Robust extraction of JSON from AI response (handles markdown blocks and minor invalid JSON)
+function extractAnalysisJson(txt) {
+  if (!txt || typeof txt !== 'string') return null;
+  let jsonStr = '';
+  const jsonBlockMatch = txt.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (jsonBlockMatch) {
+    jsonStr = jsonBlockMatch[1].trim();
+  } else {
+    const jsonStart = txt.indexOf('{');
+    const jsonEnd = txt.lastIndexOf('}');
+    if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+      jsonStr = txt.substring(jsonStart, jsonEnd + 1);
+    }
+  }
+  if (!jsonStr) return null;
+  // Try parse as-is
+  try {
+    return JSON.parse(jsonStr);
+  } catch (_) {}
+  // Fix common issues: trailing commas before } or ]
+  try {
+    const fixed = jsonStr.replace(/,(\s*[}\]])/g, '$1');
+    return JSON.parse(fixed);
+  } catch (_) {}
+  // Try with truncated content in case of cut-off response
+  try {
+    let depth = 0;
+    let end = -1;
+    for (let i = 0; i < jsonStr.length; i++) {
+      const c = jsonStr[i];
+      if (c === '{' || c === '[') depth++;
+      else if (c === '}' || c === ']') {
+        depth--;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    if (end > 0) {
+      return JSON.parse(jsonStr.substring(0, end + 1));
+    }
+  } catch (_) {}
+  return null;
 }
 
 app.post('/api/chat', async function(req, res) {
@@ -867,51 +965,152 @@ QUESTION: ${req.body.question}`;
   }
 });
 
+// Helper function to check if a date is within the last 2 weeks
+function isRecentActivity(dateString) {
+  if (!dateString) return false;
+  const date = new Date(dateString);
+  const twoWeeksAgo = new Date();
+  twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
+  return date >= twoWeeksAgo;
+}
+
+// Helper function to format date and add recent indicator
+function formatWithRecent(dateString, label) {
+  if (!dateString) return label;
+  const isRecent = isRecentActivity(dateString);
+  const date = new Date(dateString);
+  const formatted = date.toLocaleDateString();
+  return isRecent ? `🆕 ${label} (${formatted})` : `${label} (${formatted})`;
+}
+
 // Function to format analysis as Google Chat card message
 function formatGoogleChatMessage(analysis, data, issueId, baseUrl) {
   const overview = analysis.projectOverview || {};
-  const metrics = analysis.metrics || {};
+  const analysisMetrics = analysis.metrics || {};
+  const dataStats = data.stats || {};
   const issueUrl = `${baseUrl}/issue/${issueId}`;
   
-  // Build sections for the card
-  const sections = [];
+  // Calculate actual stats from data
+  const totalTickets = (data.children?.length || 0) + 1; // parent + children
+  const totalComments = dataStats.totalComments || 0;
+  const totalRelated = dataStats.totalRelated || 0;
   
-  // Section 1: Header and Stats
-  const headerWidgets = [];
+  // Count tickets by state
+  const childrenByState = dataStats.childrenByState || {};
+  const parentState = data.parent?.state || '';
+  let completed = 0;
+  let inProgress = 0;
+  let notStarted = 0;
+  let blocked = 0;
   
-  // Project header
-  headerWidgets.push({
-    keyValue: {
-      topLabel: 'Project',
-      content: overview.name || `Issue ${issueId}`,
-      contentMultiline: false,
-      icon: 'DESCRIPTION',
-      button: {
-        textButton: {
-          text: 'VIEW ISSUE',
-          onClick: {
-            openLink: {
-              url: issueUrl
-            }
-          }
-        }
-      }
+  // Count parent
+  if (parentState) {
+    const stateLower = parentState.toLowerCase();
+    if (stateLower.includes('done') || stateLower.includes('closed') || stateLower.includes('resolved') || stateLower.includes('completed')) {
+      completed++;
+    } else if (stateLower.includes('progress') || stateLower.includes('in work')) {
+      inProgress++;
+    } else if (stateLower.includes('blocked')) {
+      blocked++;
+    } else {
+      notStarted++;
+    }
+  }
+  
+  // Count children
+  Object.keys(childrenByState).forEach(state => {
+    const stateLower = state.toLowerCase();
+    const count = childrenByState[state] || 0;
+    if (stateLower.includes('done') || stateLower.includes('closed') || stateLower.includes('resolved') || stateLower.includes('completed')) {
+      completed += count;
+    } else if (stateLower.includes('progress') || stateLower.includes('in work')) {
+      inProgress += count;
+    } else if (stateLower.includes('blocked')) {
+      blocked += count;
+    } else {
+      notStarted += count;
     }
   });
   
-  // Status
-  if (overview.status) {
-    headerWidgets.push({
-      keyValue: {
-        topLabel: 'Status',
-        content: overview.status,
-        contentMultiline: false,
-        icon: 'STAR'
+  // Calculate completion rate
+  const completionRate = totalTickets > 0 ? ((completed / totalTickets) * 100).toFixed(2) + '%' : 'N/A';
+  
+  // Use calculated stats or fall back to analysis metrics
+  const metrics = {
+    total: totalTickets,
+    completed: completed,
+    inProgress: inProgress,
+    notStarted: notStarted,
+    blocked: blocked,
+    completionRate: completionRate,
+    totalComments: totalComments,
+    relatedItemsCount: totalRelated
+  };
+  
+  // Google Chat has size limits, so we'll create multiple cards
+  const cards = [];
+  
+  // Card 1: Header, Stats, and Executive Summary
+  const card1Sections = [];
+  
+  // Header section
+  card1Sections.push({
+    widgets: [
+      {
+        keyValue: {
+          topLabel: 'Project',
+          content: overview.name || `Issue ${issueId}`,
+          contentMultiline: false,
+          icon: 'DESCRIPTION',
+          button: {
+            textButton: {
+              text: 'VIEW ISSUE',
+              onClick: {
+                openLink: {
+                  url: issueUrl
+                }
+              }
+            }
+          }
+        }
+      },
+      ...(overview.status ? [{
+        keyValue: {
+          topLabel: 'Status',
+          content: overview.status,
+          contentMultiline: false,
+          icon: 'STAR'
+        }
+      }] : [])
+    ]
+  });
+  
+  // Calculate recent activity stats
+  let recentResolved = 0;
+  let recentUpdated = 0;
+  let recentComments = 0;
+  
+  // Check parent
+  if (data.parent) {
+    if (data.parent.resolvedDate && isRecentActivity(data.parent.resolvedDate)) recentResolved++;
+    if (data.parent.updatedDate && isRecentActivity(data.parent.updatedDate) && !isRecentActivity(data.parent.resolvedDate)) recentUpdated++;
+    if (data.parent.comments) {
+      recentComments += data.parent.comments.filter(c => isRecentActivity(c.createdDate)).length;
+    }
+  }
+  
+  // Check children
+  if (data.children) {
+    data.children.forEach(child => {
+      if (child.resolvedDate && isRecentActivity(child.resolvedDate)) recentResolved++;
+      if (child.updatedDate && isRecentActivity(child.updatedDate) && !isRecentActivity(child.resolvedDate)) recentUpdated++;
+      if (child.comments) {
+        recentComments += child.comments.filter(c => isRecentActivity(c.createdDate)).length;
       }
     });
   }
   
-  // Stats grid
+  // Stats section
   const statsText = [
     `${metrics.total || 0} Total`,
     `${metrics.completed || 0} Done`,
@@ -923,150 +1122,427 @@ function formatGoogleChatMessage(analysis, data, issueId, baseUrl) {
     `${metrics.relatedItemsCount || 0} Related`
   ].join(' | ');
   
-  headerWidgets.push({
-    textParagraph: {
-      text: '<b>📊 Stats</b>\n' + statsText
-    }
+  const recentActivityText = recentResolved > 0 || recentUpdated > 0 || recentComments > 0
+    ? `\n🆕 Recent (last 2 weeks): ${recentResolved} resolved, ${recentUpdated} updated, ${recentComments} comments`
+    : '';
+  
+  card1Sections.push({
+    widgets: [{
+      textParagraph: {
+        text: '<b>📊 Stats</b>\n' + statsText + recentActivityText
+      }
+    }]
   });
   
-  sections.push({ widgets: headerWidgets });
-  
-  // Section 2: Executive Summary
+  // Executive Summary
   if (analysis.executiveSummary) {
-    const summaryText = analysis.executiveSummary.length > 1000 
-      ? analysis.executiveSummary.substring(0, 1000) + '...' 
-      : analysis.executiveSummary;
+    // Handle both string and array formats
+    let summaryText = '';
+    if (typeof analysis.executiveSummary === 'string') {
+      summaryText = analysis.executiveSummary;
+    } else if (Array.isArray(analysis.executiveSummary)) {
+      summaryText = analysis.executiveSummary.join('\n');
+    } else {
+      summaryText = String(analysis.executiveSummary);
+    }
     
-    sections.push({
+    // Clean up the text (keep newlines for readability)
+    summaryText = summaryText.replace(/\n\n+/g, '\n');
+    
+    card1Sections.push({
       widgets: [{
         textParagraph: {
-          text: '<b>📋 Executive Summary</b>\n' + summaryText.replace(/\n\n+/g, '\n').replace(/\n/g, ' ')
+          text: '<b>📋 Executive Summary</b>\n' + summaryText
         }
       }]
     });
   }
   
-  // Section 3: Key Decisions
+  cards.push({
+    header: {
+      title: overview.name || `Project Analysis: ${issueId}`,
+      subtitle: overview.status || 'Analysis Complete',
+      imageUrl: 'https://www.gstatic.com/images/icons/material/system/1x/description_googblue_24dp.png',
+      imageStyle: 'IMAGE'
+    },
+    sections: card1Sections
+  });
+  
+  // Card 2: Key Decisions and Discussion Highlights - prioritize recent
+  const card2Sections = [];
+  
   if (analysis.keyDecisions && analysis.keyDecisions.length > 0) {
-    const decisions = analysis.keyDecisions.map((d, i) => 
-      `${i + 1}. ${d.decision}${d.madeBy ? ' (by ' + d.madeBy + ')' : ''}${d.ticketId ? ' - ' + d.ticketId : ''}`
-    ).join('\n');
-    
-    sections.push({
-      widgets: [{
-        textParagraph: {
-          text: '<b>🎯 Key Decisions</b>\n' + decisions
-        }
-      }]
+    // Sort decisions: recent first
+    const sortedDecisions = [...analysis.keyDecisions].sort((a, b) => {
+      const dateA = a.date ? new Date(a.date) : new Date(0);
+      const dateB = b.date ? new Date(b.date) : new Date(0);
+      const isRecentA = isRecentActivity(a.date);
+      const isRecentB = isRecentActivity(b.date);
+      if (isRecentA && !isRecentB) return -1;
+      if (!isRecentA && isRecentB) return 1;
+      return dateB - dateA;
     });
-  }
-  
-  // Section 4: Discussion Highlights
-  if (analysis.discussionHighlights && analysis.discussionHighlights.length > 0) {
-    const highlights = analysis.discussionHighlights.map((h, i) => 
-      `${i + 1}. <b>${h.topic}</b>: ${h.summary}${h.participants ? ' (Participants: ' + h.participants + ')' : ''}${h.ticketId ? ' - ' + h.ticketId : ''}`
-    ).join('\n\n');
     
-    sections.push({
-      widgets: [{
-        textParagraph: {
-          text: '<b>💭 Discussion Highlights</b>\n' + highlights
-        }
-      }]
-    });
-  }
-  
-  // Section 5: Team Contributions
-  if (analysis.teamContributions && analysis.teamContributions.length > 0) {
-    const teamContribs = analysis.teamContributions.map(t => {
-      const ticketCount = (t.ticketsCompleted || []).length;
-      const commentCount = t.commentCount || 0;
-      const tickets = (t.ticketsCompleted || []).slice(0, 5).join(', ');
-      const moreTickets = ticketCount > 5 ? ` +${ticketCount - 5} more` : '';
-      return `<b>${t.person}</b>: ${ticketCount} tickets, ${commentCount} comments${tickets ? ' (' + tickets + moreTickets + ')' : ''}`
+    const decisions = sortedDecisions.map((d, i) => {
+      const recentBadge = isRecentActivity(d.date) ? ' 🆕' : '';
+      const dateInfo = d.date ? ` (${new Date(d.date).toLocaleDateString()})` : '';
+      return `${i + 1}. ${d.decision}${recentBadge}${d.madeBy ? ' (by ' + d.madeBy + ')' : ''}${d.ticketId ? ' - ' + d.ticketId : ''}${dateInfo}`;
     }).join('\n');
     
-    sections.push({
+    card2Sections.push({
       widgets: [{
         textParagraph: {
-          text: '<b>👥 Team Contributions</b>\n' + teamContribs
+          text: '<b>🎯 Key Decisions</b> (🆕 = last 2 weeks, sorted: recent first)\n' + decisions
         }
       }]
     });
   }
   
-  // Section 6: Work Breakdown
-  if (analysis.workBreakdown && analysis.workBreakdown.length > 0) {
-    const workBreakdown = analysis.workBreakdown.map(w => {
-      const ticketList = (w.tickets || []).slice(0, 5).map(t => `${t.id}: ${t.title.substring(0, 40)}${t.title.length > 40 ? '...' : ''}`).join('\n  ');
-      const moreTickets = (w.tickets || []).length > 5 ? `\n  ... and ${(w.tickets || []).length - 5} more` : '';
-      return `<b>${w.category}</b> (${w.status || 'N/A'})\n  ${ticketList}${moreTickets}`;
+  if (analysis.discussionHighlights && analysis.discussionHighlights.length > 0) {
+    // Get dates and sort
+    const highlightsWithDates = analysis.discussionHighlights.map(h => {
+      const ticket = data.parent?.id === h.ticketId ? data.parent : 
+                    (data.children || []).find(c => c.id === h.ticketId);
+      return {
+        highlight: h,
+        date: ticket ? (ticket.updatedDate || ticket.createdDate) : null
+      };
+    });
+    
+    highlightsWithDates.sort((a, b) => {
+      const dateA = a.date ? new Date(a.date) : new Date(0);
+      const dateB = b.date ? new Date(b.date) : new Date(0);
+      const isRecentA = isRecentActivity(a.date);
+      const isRecentB = isRecentActivity(b.date);
+      if (isRecentA && !isRecentB) return -1;
+      if (!isRecentA && isRecentB) return 1;
+      return dateB - dateA;
+    });
+    
+    const highlights = highlightsWithDates.map((item, i) => {
+      const h = item.highlight;
+      const recentBadge = isRecentActivity(item.date) ? ' 🆕' : '';
+      const dateInfo = item.date ? ` (${new Date(item.date).toLocaleDateString()})` : '';
+      return `${i + 1}. <b>${h.topic}</b>${recentBadge}: ${h.summary}${h.participants ? ' (Participants: ' + h.participants + ')' : ''}${h.ticketId ? ' - ' + h.ticketId : ''}${dateInfo}`;
     }).join('\n\n');
     
-    sections.push({
+    card2Sections.push({
       widgets: [{
         textParagraph: {
-          text: '<b>📁 Work Breakdown</b>\n' + workBreakdown
+          text: '<b>💭 Discussion Highlights</b> (🆕 = last 2 weeks, sorted: recent first)\n' + highlights
         }
       }]
     });
   }
   
-  // Section 7: Dependencies
+  if (card2Sections.length > 0) {
+    cards.push({
+      header: {
+        title: 'Decisions & Discussions',
+        subtitle: `Issue ${issueId}`
+      },
+      sections: card2Sections
+    });
+  }
+  
+  // Card 3: Team Contributions and Work Breakdown
+  const card3Sections = [];
+  
+  if (analysis.teamContributions && analysis.teamContributions.length > 0) {
+    // Calculate recent activity and sort
+    const teamWithActivity = analysis.teamContributions.map(t => {
+      let recentTickets = 0;
+      let recentComments = 0;
+      
+      (t.ticketsCompleted || []).forEach(ticketId => {
+        const ticket = data.parent?.id === ticketId ? data.parent :
+                      (data.children || []).find(c => c.id === ticketId);
+        if (ticket && (isRecentActivity(ticket.resolvedDate) || isRecentActivity(ticket.updatedDate))) {
+          recentTickets++;
+        }
+      });
+      
+      if (data.allComments) {
+        data.allComments.forEach(ic => {
+          ic.comments.forEach(c => {
+            if (c.author === t.person && isRecentActivity(c.createdDate)) {
+              recentComments++;
+            }
+          });
+        });
+      }
+      
+      return {
+        person: t,
+        recentTickets,
+        recentComments,
+        hasRecentActivity: recentTickets > 0 || recentComments > 0
+      };
+    });
+    
+    // Sort: people with recent activity first
+    teamWithActivity.sort((a, b) => {
+      if (a.hasRecentActivity && !b.hasRecentActivity) return -1;
+      if (!a.hasRecentActivity && b.hasRecentActivity) return 1;
+      return (b.recentTickets + b.recentComments) - (a.recentTickets + a.recentComments);
+    });
+    
+    const teamContribs = teamWithActivity.map(item => {
+      const t = item.person;
+      const ticketCount = (t.ticketsCompleted || []).length;
+      const commentCount = t.commentCount || 0;
+      const tickets = (t.ticketsCompleted || []).join(', ');
+      const recentBadge = item.hasRecentActivity ? ' 🆕' : '';
+      const recentInfo = item.hasRecentActivity ? 
+        ` (${item.recentTickets} recent tickets, ${item.recentComments} recent comments)` : '';
+      return `<b>${t.person}</b>${recentBadge}: ${ticketCount} tickets, ${commentCount} comments${recentInfo}${tickets ? ' (' + tickets + ')' : ''}`;
+    }).join('\n');
+    
+    card3Sections.push({
+      widgets: [{
+        textParagraph: {
+          text: '<b>👥 Team Contributions</b> (🆕 = recent activity, sorted: recent first)\n' + teamContribs
+        }
+      }]
+    });
+  }
+  
+  if (analysis.workBreakdown && analysis.workBreakdown.length > 0) {
+    const workBreakdown = analysis.workBreakdown.map(w => {
+      // Sort tickets: recent first
+      const ticketsWithDates = (w.tickets || []).map(t => {
+        const searchId = String(t.id);
+        const ticket = data.parent && String(data.parent.id) === searchId ? data.parent : 
+                      (data.children || []).find(c => String(c.id) === searchId);
+        return {
+          ticket: t,
+          ticketData: ticket,
+          date: ticket ? (ticket.resolvedDate || ticket.updatedDate || ticket.createdDate) : null,
+          isRecent: ticket ? (isRecentActivity(ticket.resolvedDate) || isRecentActivity(ticket.updatedDate)) : false
+        };
+      });
+      
+      ticketsWithDates.sort((a, b) => {
+        const dateA = a.date ? new Date(a.date) : new Date(0);
+        const dateB = b.date ? new Date(b.date) : new Date(0);
+        if (a.isRecent && !b.isRecent) return -1;
+        if (!a.isRecent && b.isRecent) return 1;
+        return dateB - dateA;
+      });
+      
+      const ticketList = ticketsWithDates.map(item => {
+        const t = item.ticket;
+        const recentIndicator = item.isRecent ? ' 🆕' : '';
+        const dateInfo = item.date ? ` (${new Date(item.date).toLocaleDateString()})` : '';
+        return `${t.id}: ${t.title}${recentIndicator}${dateInfo}`;
+      }).join('\n  ');
+      return `<b>${w.category}</b> (${w.status || 'N/A'})\n  ${ticketList}`;
+    }).join('\n\n');
+    
+    card3Sections.push({
+      widgets: [{
+        textParagraph: {
+          text: '<b>📁 Work Breakdown</b> (🆕 = resolved/updated in last 2 weeks, sorted: recent first)\n' + workBreakdown
+        }
+      }]
+    });
+  }
+  
+  if (card3Sections.length > 0) {
+    cards.push({
+      header: {
+        title: 'Team & Work Breakdown',
+        subtitle: `Issue ${issueId}`
+      },
+      sections: card3Sections
+    });
+  }
+  
+  // Card 4: Dependencies, Risks, Blockers
+  const card4Sections = [];
+  
   if (analysis.dependencies && analysis.dependencies.length > 0) {
-    const dependencies = analysis.dependencies.map(d => {
+    // Get dates - use explicit date if provided, otherwise infer from related tickets
+    const depsWithDates = analysis.dependencies.map(d => {
+      let date = d.date || null;
+      let ticket = null;
+      if (!date && d.relatedTicketId) {
+        const searchId = String(d.relatedTicketId);
+        ticket = data.parent && String(data.parent.id) === searchId ? data.parent :
+         (data.children || []).find(c => String(c.id) === searchId);
+        if (ticket) {
+          date = ticket.createdDate || ticket.updatedDate || ticket.resolvedDate;
+        }
+      } else if (d.relatedTicketId) {
+        const searchId = String(d.relatedTicketId);
+        ticket = data.parent && String(data.parent.id) === searchId ? data.parent :
+         (data.children || []).find(c => String(c.id) === searchId);
+      }
+      return {
+        dep: d,
+        date: date,
+        isRecent: date ? isRecentActivity(date) : (ticket ? (isRecentActivity(ticket.resolvedDate) || isRecentActivity(ticket.updatedDate)) : false)
+      };
+    });
+    
+    depsWithDates.sort((a, b) => {
+      const dateA = a.date ? new Date(a.date) : new Date(0);
+      const dateB = b.date ? new Date(b.date) : new Date(0);
+      if (a.isRecent && !b.isRecent) return -1;
+      if (!a.isRecent && b.isRecent) return 1;
+      return dateB - dateA;
+    });
+    
+    const dependencies = depsWithDates.map(item => {
+      const d = item.dep;
+      const recentBadge = item.isRecent ? ' 🆕' : '';
+      const dateInfo = item.date ? ` (${new Date(item.date).toLocaleDateString()})` : '';
       const ticketLink = d.relatedTicketId ? ` - ${d.relatedTicketId}` : '';
-      return `• ${d.dependency} (${d.type || 'N/A'}) - ${d.status || 'N/A'}${d.owner ? ' - Owner: ' + d.owner : ''}${ticketLink}`;
+      return `• ${d.dependency}${recentBadge} (${d.type || 'N/A'}) - ${d.status || 'N/A'}${d.owner ? ' - ' + d.owner : ''}${ticketLink}${dateInfo}`;
     }).join('\n');
     
-    sections.push({
+    card4Sections.push({
       widgets: [{
         textParagraph: {
-          text: '<b>🔗 Dependencies</b>\n' + dependencies
+          text: '<b>🔗 Dependencies</b> (🆕 = last 2 weeks, sorted: recent first)\n' + dependencies
         }
       }]
     });
   }
   
-  // Section 8: Risks
   if (analysis.risks && analysis.risks.length > 0) {
-    const risks = analysis.risks.map(r => {
-      return `• <b>${r.risk}</b> (${r.likelihood || 'Unknown'} likelihood, ${r.impact || 'Unknown'} impact)${r.owner ? ' - Owner: ' + r.owner : ''}${r.sourceTicketId ? ' - ' + r.sourceTicketId : ''}`;
+    // Get dates - use explicit date if provided, otherwise infer from source tickets
+    const risksWithDates = analysis.risks.map(r => {
+      let date = r.date || null;
+      let ticket = null;
+      if (!date && r.sourceTicketId) {
+        const searchId = String(r.sourceTicketId);
+        ticket = data.parent && String(data.parent.id) === searchId ? data.parent :
+         (data.children || []).find(c => String(c.id) === searchId);
+        if (ticket) {
+          date = ticket.resolvedDate || ticket.updatedDate || ticket.createdDate;
+        }
+      } else if (r.sourceTicketId) {
+        const searchId = String(r.sourceTicketId);
+        ticket = data.parent && String(data.parent.id) === searchId ? data.parent :
+         (data.children || []).find(c => String(c.id) === searchId);
+      }
+      return {
+        risk: r,
+        date: date,
+        isRecent: date ? isRecentActivity(date) : (ticket ? (isRecentActivity(ticket.resolvedDate) || isRecentActivity(ticket.updatedDate)) : false)
+      };
+    });
+    
+    risksWithDates.sort((a, b) => {
+      const dateA = a.date ? new Date(a.date) : new Date(0);
+      const dateB = b.date ? new Date(b.date) : new Date(0);
+      if (a.isRecent && !b.isRecent) return -1;
+      if (!a.isRecent && b.isRecent) return 1;
+      return dateB - dateA;
+    });
+    
+    const risks = risksWithDates.map(item => {
+      const r = item.risk;
+      const recentBadge = item.isRecent ? ' 🆕' : '';
+      const dateInfo = item.date ? ` (Highlighted: ${new Date(item.date).toLocaleDateString()})` : '';
+      return `• <b>${r.risk}</b>${recentBadge} (${r.likelihood || 'Unknown'}, ${r.impact || 'Unknown'})${r.owner ? ' - ' + r.owner : ''}${r.sourceTicketId ? ' - ' + r.sourceTicketId : ''}${dateInfo}`;
     }).join('\n');
     
-    sections.push({
+    card4Sections.push({
       widgets: [{
         textParagraph: {
-          text: '<b>⚠️ Risks</b>\n' + risks
+          text: '<b>⚠️ Risks</b> (🆕 = last 2 weeks, sorted: recent first)\n' + risks
         }
       }]
     });
   }
   
-  // Section 9: Blockers
   if (analysis.blockers && analysis.blockers.length > 0) {
-    const blockers = analysis.blockers.map(b => {
-      const ticketInfo = b.ticket ? ` - Ticket: ${b.ticket}` : '';
-      const resolution = b.resolution ? `\n  Resolution: ${b.resolution}` : '';
-      return `• ${b.blocker}${ticketInfo}${resolution}`;
+    // Get dates - use explicit date if provided, otherwise infer from blocker tickets
+    const blockersWithDates = analysis.blockers.map(b => {
+      let date = b.date || null;
+      let ticket = null;
+      if (!date && b.ticket) {
+        const searchId = String(b.ticket);
+        ticket = data.parent && String(data.parent.id) === searchId ? data.parent :
+         (data.children || []).find(c => String(c.id) === searchId);
+        if (ticket) {
+          date = ticket.resolvedDate || ticket.updatedDate || ticket.createdDate;
+        }
+      } else if (b.ticket) {
+        const searchId = String(b.ticket);
+        ticket = data.parent && String(data.parent.id) === searchId ? data.parent :
+         (data.children || []).find(c => String(c.id) === searchId);
+      }
+      return {
+        blocker: b,
+        date: date,
+        isRecent: date ? isRecentActivity(date) : (ticket ? (isRecentActivity(ticket.resolvedDate) || isRecentActivity(ticket.updatedDate)) : false)
+      };
+    });
+    
+    blockersWithDates.sort((a, b) => {
+      const dateA = a.date ? new Date(a.date) : new Date(0);
+      const dateB = b.date ? new Date(b.date) : new Date(0);
+      if (a.isRecent && !b.isRecent) return -1;
+      if (!a.isRecent && b.isRecent) return 1;
+      return dateB - dateA;
+    });
+    
+    const blockers = blockersWithDates.map(item => {
+      const b = item.blocker;
+      const recentBadge = item.isRecent ? ' 🆕' : '';
+      const dateInfo = item.date ? ` (${new Date(item.date).toLocaleDateString()})` : '';
+      const ticketInfo = b.ticket ? ` - ${b.ticket}` : '';
+      const resolution = b.resolution ? `\n  ✓ ${b.resolution}` : '';
+      return `• ${b.blocker}${recentBadge}${ticketInfo}${dateInfo}${resolution}`;
     }).join('\n');
     
-    sections.push({
+    card4Sections.push({
       widgets: [{
         textParagraph: {
-          text: '<b>🚫 Blockers</b>\n' + blockers
+          text: '<b>🚫 Blockers</b> (🆕 = last 2 weeks, sorted: recent first)\n' + blockers
         }
       }]
     });
   }
   
-  // Section 10: Next Steps
+  if (card4Sections.length > 0) {
+    cards.push({
+      header: {
+        title: 'Dependencies, Risks & Blockers',
+        subtitle: `Issue ${issueId}`
+      },
+      sections: card4Sections
+    });
+  }
+  
+  // Card 5: Next Steps and Tickets
+  const card5Sections = [];
+  
   if (analysis.nextSteps && analysis.nextSteps.length > 0) {
-    const nextSteps = analysis.nextSteps.map((n, i) => 
-      `${i + 1}. ${n.action} (${n.owner || 'Unassigned'}) - ${n.priority || 'Normal'}`
-    ).join('\n');
+    const nextSteps = analysis.nextSteps.map((n, i) => {
+      // Try to find date from ticket if action mentions a ticket ID
+      let nextStepDate = null;
+      if (n.ticketId) {
+        const ticket = data.parent?.id === n.ticketId ? data.parent :
+                      (data.children || []).find(c => c.id === n.ticketId);
+        nextStepDate = ticket ? (ticket.createdDate || ticket.updatedDate) : null;
+      } else if (n.action) {
+        // Try to extract ticket ID from action text
+        const ticketMatch = n.action.match(/\b[A-Z]+-\d+\b/);
+        if (ticketMatch) {
+          const ticket = data.parent?.id === ticketMatch[0] ? data.parent :
+                        (data.children || []).find(c => c.id === ticketMatch[0]);
+          nextStepDate = ticket ? (ticket.createdDate || ticket.updatedDate) : null;
+        }
+      }
+      const dateInfo = nextStepDate ? ` (Identified: ${new Date(nextStepDate).toLocaleDateString()})` : '';
+      return `${i + 1}. ${n.action} (${n.owner || 'Unassigned'}) - ${n.priority || 'Normal'}${dateInfo}`;
+    }).join('\n');
     
-    sections.push({
+    card5Sections.push({
       widgets: [{
         textParagraph: {
           text: '<b>➡️ Next Steps</b>\n' + nextSteps
@@ -1075,75 +1551,73 @@ function formatGoogleChatMessage(analysis, data, issueId, baseUrl) {
     });
   }
   
-  // Section 11: All Tickets with Links
-  const ticketWidgets = [];
-  
-  // Add parent ticket with link
+  // Tickets section - show all tickets sorted by date (recent first)
+  const allTicketsForChat = [];
   if (data.parent) {
+    const parentDate = data.parent.resolvedDate || data.parent.updatedDate || data.parent.createdDate;
+    allTicketsForChat.push({
+      ticket: data.parent,
+      date: parentDate,
+      isParent: true
+    });
+  }
+  if (data.children) {
+    data.children.forEach(child => {
+      const childDate = child.resolvedDate || child.updatedDate || child.createdDate;
+      allTicketsForChat.push({
+        ticket: child,
+        date: childDate,
+        isParent: false
+      });
+    });
+  }
+  
+  // Sort: recent first, then by date descending
+  allTicketsForChat.sort((a, b) => {
+    const dateA = a.date ? new Date(a.date) : new Date(0);
+    const dateB = b.date ? new Date(b.date) : new Date(0);
+    const isRecentA = isRecentActivity(a.ticket.resolvedDate) || isRecentActivity(a.ticket.updatedDate);
+    const isRecentB = isRecentActivity(b.ticket.resolvedDate) || isRecentActivity(b.ticket.updatedDate);
+    if (isRecentA && !isRecentB) return -1;
+    if (!isRecentA && isRecentB) return 1;
+    return dateB - dateA;
+  });
+  
+  const ticketWidgets = [];
+  allTicketsForChat.forEach(item => {
+    const t = item.ticket;
+    const isRecentResolved = t.resolvedDate && isRecentActivity(t.resolvedDate);
+    const isRecentUpdated = t.updatedDate && isRecentActivity(t.updatedDate);
+    const recentIndicator = (isRecentResolved || isRecentUpdated) ? ' 🆕' : '';
+    const resolvedInfo = isRecentResolved ? ` (Resolved: ${new Date(t.resolvedDate).toLocaleDateString()})` : '';
+    const updatedInfo = isRecentUpdated && !isRecentResolved ? ` (Updated: ${new Date(t.updatedDate).toLocaleDateString()})` : '';
+    const dateInfo = !isRecentResolved && !isRecentUpdated && item.date ? ` (${new Date(item.date).toLocaleDateString()})` : '';
+    
     ticketWidgets.push({
       keyValue: {
-        topLabel: 'Parent Ticket',
-        content: `${data.parent.id}: ${data.parent.title.substring(0, 50)}${data.parent.title.length > 50 ? '...' : ''}`,
+        topLabel: (item.isParent ? 'Parent' : (t.state || 'Open')) + recentIndicator,
+        content: `${t.id}: ${t.title}${resolvedInfo}${updatedInfo}${dateInfo}`,
         contentMultiline: false,
-        icon: 'DESCRIPTION',
         button: {
           textButton: {
             text: 'VIEW',
             onClick: {
               openLink: {
-                url: `${baseUrl}/issue/${data.parent.id}`
+                url: `${baseUrl}/issue/${t.id}`
               }
             }
           }
         }
       }
     });
-  }
-  
-  // Add child tickets (up to 10 with buttons, rest as text)
-  if (data.children && data.children.length > 0) {
-    const childrenToShow = data.children.slice(0, 10);
-    const remainingCount = data.children.length - 10;
-    
-    childrenToShow.forEach(child => {
-      ticketWidgets.push({
-        keyValue: {
-          topLabel: child.state || 'Unknown',
-          content: `${child.id}: ${child.title.substring(0, 50)}${child.title.length > 50 ? '...' : ''}`,
-          contentMultiline: false,
-          button: {
-            textButton: {
-              text: 'VIEW',
-              onClick: {
-                openLink: {
-                  url: `${baseUrl}/issue/${child.id}`
-                }
-              }
-            }
-          }
-        }
-      });
-    });
-    
-    if (remainingCount > 0) {
-      const remainingTickets = data.children.slice(10).map(c => 
-        `${c.id}: ${c.title.substring(0, 40)}${c.title.length > 40 ? '...' : ''} (${c.state || 'Unknown'})`
-      ).join('\n');
-      
-      ticketWidgets.push({
-        textParagraph: {
-          text: `<b>... and ${remainingCount} more tickets:</b>\n${remainingTickets.substring(0, 500)}${remainingTickets.length > 500 ? '...' : ''}`
-        }
-      });
-    }
-  }
+  });
   
   if (ticketWidgets.length > 0) {
-    sections.push({
+    card5Sections.push({
       widgets: [
         {
           textParagraph: {
-            text: '<b>📄 All Tickets</b>'
+            text: '<b>📄 All Tickets</b> (🆕 = resolved/updated in last 2 weeks)'
           }
         },
         ...ticketWidgets
@@ -1152,7 +1626,7 @@ function formatGoogleChatMessage(analysis, data, issueId, baseUrl) {
   }
   
   // Footer button
-  sections.push({
+  card5Sections.push({
     widgets: [{
       buttons: [{
         textButton: {
@@ -1167,17 +1641,17 @@ function formatGoogleChatMessage(analysis, data, issueId, baseUrl) {
     }]
   });
   
-  return {
-    cards: [{
+  if (card5Sections.length > 0) {
+    cards.push({
       header: {
-        title: overview.name || `Project Analysis: ${issueId}`,
-        subtitle: overview.status || 'Analysis Complete',
-        imageUrl: 'https://www.gstatic.com/images/icons/material/system/1x/description_googblue_24dp.png',
-        imageStyle: 'IMAGE'
+        title: 'Next Steps & Tickets',
+        subtitle: `Issue ${issueId}`
       },
-      sections: sections
-    }]
-  };
+      sections: card5Sections
+    });
+  }
+  
+  return { cards: cards };
 }
 
 // Function to send message to Google Chat webhook
@@ -1294,13 +1768,23 @@ app.delete('/api/history/:id', function(req, res) {
   res.json({ success: true });
 });
 
-// Client-side JavaScript
-const clientScript = `
+// Client-side JavaScript (String.raw prevents escape processing so regex patterns work as-written)
+const clientScript = String.raw`
 console.log('PM Intelligence Assistant - YouTrack - Script Loaded');
 console.log('Page loaded at:', new Date().toISOString());
 
 var DATA = null;
+var _scriptLoaded = true;
 var BASE = "";
+
+// Helper function to check if a date is within the last 2 weeks
+function isRecentActivity(dateString) {
+  if (!dateString) return false;
+  var date = new Date(dateString);
+  var twoWeeksAgo = new Date();
+  twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
+  return date >= twoWeeksAgo;
+}
 
 function link(id) {
   return '<a href="' + BASE + '/issue/' + id + '" target="_blank" class="text-purple-400 underline">' + id + '</a>';
@@ -1308,7 +1792,7 @@ function link(id) {
 
 function linkify(txt) {
   if (!txt || !BASE) return txt || "";
-  return String(txt).replace(/\\b([A-Z]+-\\d+)\\b/g, function(m) {
+  return String(txt).replace(/\b([A-Z]+-\d+)\b/g, function(m) {
     return '<a href="' + BASE + '/issue/' + m + '" target="_blank" class="text-purple-400 underline">' + m + '</a>';
   });
 }
@@ -1322,6 +1806,89 @@ function stripHtml(html) {
 function formatDate(ts) {
   if (!ts) return "N/A";
   return new Date(ts).toLocaleDateString();
+}
+
+// Helper to get date from ticket by ID (handles both string and numeric IDs)
+function getTicketDate(ticketId, d, preferResolved) {
+  if (!ticketId || !d || !d.tickets) return null;
+  // Normalize ticket ID for comparison (convert to string)
+  var searchId = String(ticketId);
+  var ticket = null;
+  
+  // Check parent
+  if (d.tickets.parent && String(d.tickets.parent.id) === searchId) {
+    ticket = d.tickets.parent;
+  } else {
+    // Check children
+    ticket = (d.tickets.children || []).find(function(c) { 
+      return String(c.id) === searchId; 
+    });
+  }
+  
+  if (!ticket) return null;
+  if (preferResolved && ticket.resolvedDate) {
+    return ticket.resolvedDate;
+  }
+  return ticket.resolvedDate || ticket.updatedDate || ticket.createdDate;
+}
+
+// Helper to get comment date for a decision/discussion from a ticket (handles both string and numeric IDs)
+function getCommentDate(ticketId, d, searchText) {
+  if (!ticketId || !d || !d.tickets) return null;
+  // Normalize ticket ID for comparison
+  var searchId = String(ticketId);
+  var ticket = null;
+  
+  // Check parent
+  if (d.tickets.parent && String(d.tickets.parent.id) === searchId) {
+    ticket = d.tickets.parent;
+  } else {
+    // Check children
+    ticket = (d.tickets.children || []).find(function(c) { 
+      return String(c.id) === searchId; 
+    });
+  }
+  
+  if (!ticket || !ticket.comments || !ticket.comments.length) return null;
+  // Find comment that might contain the decision/discussion
+  var matchingComment = ticket.comments.find(function(c) {
+    return searchText && c.text && c.text.toLowerCase().includes(searchText.toLowerCase().substring(0, 20));
+  });
+  if (matchingComment && matchingComment.createdDate) return matchingComment.createdDate;
+  // Return most recent comment date if no match
+  var sorted = ticket.comments.slice().sort(function(a, b) {
+    return new Date(b.createdDate || 0) - new Date(a.createdDate || 0);
+  });
+  return sorted[0] && sorted[0].createdDate ? sorted[0].createdDate : null;
+}
+
+// Helper to get latest resolved date from multiple ticket IDs (handles both string and numeric IDs)
+function getLatestResolvedDate(ticketIds, d) {
+  if (!ticketIds || !Array.isArray(ticketIds) || !d) return null;
+  var dates = ticketIds.map(function(id) {
+    // Normalize ticket ID for comparison
+    var searchId = String(id);
+    var ticket = null;
+    
+    // Check parent
+    if (d.tickets.parent && String(d.tickets.parent.id) === searchId) {
+      ticket = d.tickets.parent;
+    } else {
+      // Check children
+      ticket = (d.tickets.children || []).find(function(c) { 
+        return String(c.id) === searchId; 
+      });
+    }
+    
+    if (!ticket) return null;
+    if (ticket.resolvedDate) {
+      return ticket.resolvedDate;
+    }
+    return null;
+  }).filter(function(d) { return d !== null; });
+  if (dates.length === 0) return null;
+  dates.sort(function(a, b) { return new Date(b) - new Date(a); });
+  return dates[0];
 }
 
 function ask(q) { document.getElementById("chatIn").value = q; chat(); }
@@ -1370,11 +1937,11 @@ async function loadHistory() {
       var statusColor = item.status === "Done" || item.status === "Closed" || item.status === "Resolved" ? "text-green-400" : 
                        item.status === "In Progress" ? "text-blue-400" : "text-slate-400";
       var chatBadge = item.hasChatData ? '<span class="text-xs bg-cyan-500/20 text-cyan-400 px-1 rounded">Chat</span>' : '';
-      
-      return '<div class="bg-slate-700 rounded-lg p-3 hover:bg-slate-600 cursor-pointer transition" onclick="loadFromHistory(\\'' + item.id + '\\')">' +
+      var id = String(item.id).replace(/"/g, '&quot;');
+      return '<div class="bg-slate-700 rounded-lg p-3 hover:bg-slate-600 cursor-pointer transition history-item" data-history-id="' + id + '">' +
         '<div class="flex justify-between items-start mb-1">' +
         '<div class="font-medium text-sm truncate flex-1">' + item.projectName + '</div>' +
-        '<button onclick="event.stopPropagation(); deleteHistory(\\'' + item.id + '\\')" class="text-red-400 hover:text-red-300 text-xs ml-2">X</button>' +
+        '<button type="button" class="history-delete text-red-400 hover:text-red-300 text-xs ml-2" data-history-id="' + id + '">X</button>' +
         '</div>' +
         '<div class="text-xs text-slate-400">' + item.issueId + ' ' + chatBadge + '</div>' +
         '<div class="flex justify-between items-center mt-2">' +
@@ -1387,6 +1954,16 @@ async function loadHistory() {
         '</div>' +
         '</div>';
     }).join('');
+    if (!list._historyClickBound) {
+      list._historyClickBound = true;
+      list.addEventListener("click", function(e) {
+        var id = e.target.getAttribute("data-history-id") || (e.target.closest && e.target.closest(".history-item") && e.target.closest(".history-item").getAttribute("data-history-id"));
+        if (e.target.classList.contains("history-delete")) {
+          e.stopPropagation();
+          if (id) deleteHistory(id);
+        } else if (id) loadFromHistory(id);
+      });
+    }
   } catch(e) {
     console.error("Failed to load history:", e);
   }
@@ -1444,11 +2021,35 @@ async function deleteHistory(id) {
 }
 
 window.addEventListener('DOMContentLoaded', function() {
+  if (location.protocol === "file:") {
+    document.getElementById("status").textContent = "This page must be opened at http://localhost:3001. Start the server with: node youtrack.js";
+    document.getElementById("status").classList.add("text-amber-400");
+    return;
+  }
   loadHistory();
 });
 
 function renderAnalysis(d) {
   var a = d.analysis;
+  if (!a) a = {};
+  // If server returned only { raw: "..." } (parse failed), try to extract JSON on the client
+  if (a.raw && typeof a.raw === 'string' && !a.projectOverview) {
+    try {
+      var rawStr = a.raw;
+      var tick = String.fromCharCode(96);
+      var codeBlockRe = new RegExp(tick + tick + tick + '(?:json)?\s*([\s\S]*?)\s*' + tick + tick + tick);
+      var jsonMatch = rawStr.match(codeBlockRe);
+      var jsonStr = jsonMatch ? jsonMatch[1].trim() : rawStr;
+      var start = jsonStr.indexOf('{');
+      if (start !== -1) {
+        var end = jsonStr.lastIndexOf('}');
+        if (end > start) jsonStr = jsonStr.substring(start, end + 1);
+        jsonStr = jsonStr.replace(/,(\s*[}\\]])/g, '$1');
+        var parsed = JSON.parse(jsonStr);
+        if (parsed && typeof parsed === 'object') a = parsed;
+      }
+    } catch (e) { console.warn('Client-side analysis parse failed:', e.message); }
+  }
   var stats = d.tickets.stats || {};
   var h = "";
   
@@ -1468,10 +2069,11 @@ function renderAnalysis(d) {
     h += '</div></div>';
   }
   
-  // Executive Summary
+  // Executive Summary (string or array of paragraphs)
   if (a.executiveSummary) {
+    var summaryText = typeof a.executiveSummary === 'string' ? a.executiveSummary : (Array.isArray(a.executiveSummary) ? a.executiveSummary.join('\n\n') : String(a.executiveSummary));
     h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">Executive Summary</h3>';
-    h += '<div class="text-slate-300 whitespace-pre-wrap">' + linkify(a.executiveSummary) + '</div></div>';
+    h += '<div class="text-slate-300 whitespace-pre-wrap">' + linkify(summaryText) + '</div></div>';
   }
   
   // Metrics
@@ -1494,47 +2096,159 @@ function renderAnalysis(d) {
     h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">Key Accomplishments</h3>';
     a.keyAccomplishments.forEach(function(x) {
       var links = (x.ticketIds||[]).map(function(i){return link(i);}).join(", ");
+      // Try to get date from tickets - check all ticket IDs
+      var accomplishedDate = null;
+      if (x.ticketIds && Array.isArray(x.ticketIds) && x.ticketIds.length > 0) {
+        accomplishedDate = getLatestResolvedDate(x.ticketIds, d);
+        // If no resolved date, try to get latest updatedDate or createdDate
+        if (!accomplishedDate) {
+          var allDates = x.ticketIds.map(function(id) {
+            return getTicketDate(id, d, false);
+          }).filter(function(d) { return d !== null; });
+          if (allDates.length > 0) {
+            allDates.sort(function(a, b) { return new Date(b) - new Date(a); });
+            accomplishedDate = allDates[0];
+          }
+        }
+      }
+      var dateInfo = accomplishedDate ? '<div class="text-xs text-slate-400 mt-1"><span class="text-green-400">✓ Accomplished:</span> ' + formatDate(accomplishedDate) + '</div>' : '<div class="text-xs text-slate-400 mt-1">Date: N/A</div>';
       h += '<div class="bg-slate-700 rounded p-3 mb-2 border-l-4 border-green-500">';
       h += '<div class="text-green-400 font-medium">' + x.accomplishment + '</div>';
       h += '<p class="text-sm text-slate-300">' + (x.impact||"") + '</p>';
-      h += '<div class="text-xs text-slate-400">Team: ' + (x.team||"N/A") + (links ? " | Tickets: " + links : "") + '</div></div>';
+      h += '<div class="text-xs text-slate-400">Team: ' + (x.team||"N/A") + (links ? " | Tickets: " + links : "") + '</div>';
+      h += dateInfo;
+      h += '</div>';
     });
     h += '</div>';
   }
   
-  // Key Decisions
+  // Key Decisions - sort by date (recent first)
   if (a.keyDecisions && a.keyDecisions.length) {
-    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">Key Decisions</h3>';
-    a.keyDecisions.forEach(function(x) {
-      h += '<div class="bg-slate-700 rounded p-3 mb-2 border-l-4 border-purple-500">';
-      h += '<div class="text-purple-400 font-medium">' + linkify(x.decision) + '</div>';
+    // Sort decisions: recent first, then by date descending
+    var sortedDecisions = a.keyDecisions.slice().sort(function(a, b) {
+      var dateA = a.date ? new Date(a.date) : new Date(0);
+      var dateB = b.date ? new Date(b.date) : new Date(0);
+      var isRecentA = isRecentActivity(a.date);
+      var isRecentB = isRecentActivity(b.date);
+      // Recent items first
+      if (isRecentA && !isRecentB) return -1;
+      if (!isRecentA && isRecentB) return 1;
+      // Then by date (newest first)
+      return dateB - dateA;
+    });
+    
+    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">Key Decisions <span class="text-xs text-green-400">🆕 = last 2 weeks</span></h3>';
+    sortedDecisions.forEach(function(x) {
+      // Get date from analysis or extract from comments/ticket
+      var decisionDate = x.date || getCommentDate(x.ticketId, d, x.decision) || getTicketDate(x.ticketId, d, false);
+      var isRecent = isRecentActivity(decisionDate);
+      var recentBadge = isRecent ? '<span class="text-green-400 text-xs ml-2">🆕</span>' : '';
+      var dateInfo = decisionDate ? ' | Date: ' + formatDate(decisionDate) : '';
+      var recentBg = isRecent ? 'bg-green-900/20' : '';
+      h += '<div class="bg-slate-700 rounded p-3 mb-2 border-l-4 ' + (isRecent ? 'border-green-500' : 'border-purple-500') + ' ' + recentBg + '">';
+      h += '<div class="text-purple-400 font-medium">' + linkify(x.decision) + recentBadge + '</div>';
       h += '<p class="text-sm text-slate-300">' + (x.context||"") + '</p>';
-      h += '<div class="text-xs text-slate-400">Made by: ' + (x.madeBy||"N/A") + ' | Ticket: ' + (x.ticketId ? link(x.ticketId) : "N/A") + '</div></div>';
+      h += '<div class="text-xs text-slate-400">Made by: ' + (x.madeBy||"N/A") + ' | Ticket: ' + (x.ticketId ? link(x.ticketId) : "N/A") + dateInfo + '</div></div>';
     });
     h += '</div>';
   }
   
-  // Discussion Highlights
+  // Discussion Highlights - sort by date (recent first)
   if (a.discussionHighlights && a.discussionHighlights.length) {
-    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">Discussion Highlights</h3>';
-    a.discussionHighlights.forEach(function(x) {
-      h += '<div class="bg-slate-700 rounded p-3 mb-2">';
-      h += '<div class="font-medium text-cyan-400">' + linkify(x.topic) + '</div>';
+    // Try to get date from ticket data or comments
+    var highlightsWithDates = a.discussionHighlights.map(function(x) {
+      var ticket = d.tickets.parent && d.tickets.parent.id === x.ticketId ? d.tickets.parent : 
+                    (d.tickets.children || []).find(function(c) { return c.id === x.ticketId; });
+      var discussionDate = getCommentDate(x.ticketId, d, x.topic) || (ticket ? (ticket.updatedDate || ticket.createdDate) : null);
+      return {
+        highlight: x,
+        date: discussionDate
+      };
+    });
+    
+    // Sort: recent first, then by date descending
+    highlightsWithDates.sort(function(a, b) {
+      var dateA = a.date ? new Date(a.date) : new Date(0);
+      var dateB = b.date ? new Date(b.date) : new Date(0);
+      var isRecentA = isRecentActivity(a.date);
+      var isRecentB = isRecentActivity(b.date);
+      if (isRecentA && !isRecentB) return -1;
+      if (!isRecentA && isRecentB) return 1;
+      return dateB - dateA;
+    });
+    
+    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">Discussion Highlights <span class="text-xs text-green-400">🆕 = last 2 weeks</span></h3>';
+    highlightsWithDates.forEach(function(item) {
+      var x = item.highlight;
+      var isRecent = isRecentActivity(item.date);
+      var recentBadge = isRecent ? '<span class="text-green-400 text-xs ml-2">🆕</span>' : '';
+      var dateInfo = item.date ? ' | Date: ' + formatDate(item.date) : '';
+      var recentBg = isRecent ? 'bg-green-900/20' : '';
+      h += '<div class="bg-slate-700 rounded p-3 mb-2 ' + recentBg + '">';
+      h += '<div class="font-medium text-cyan-400">' + linkify(x.topic) + recentBadge + '</div>';
       h += '<p class="text-sm text-slate-300">' + (x.summary||"") + '</p>';
-      h += '<div class="text-xs text-slate-400">Participants: ' + (x.participants||"N/A") + ' | Ticket: ' + (x.ticketId ? link(x.ticketId) : "N/A") + '</div></div>';
+      h += '<div class="text-xs text-slate-400">Participants: ' + (x.participants||"N/A") + ' | Ticket: ' + (x.ticketId ? link(x.ticketId) : "N/A") + dateInfo + '</div></div>';
     });
     h += '</div>';
   }
   
-  // Team Contributions
+  // Team Contributions - sort by recent activity
   if (a.teamContributions && a.teamContributions.length) {
-    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">Team Contributions</h3><div class="grid grid-cols-2 gap-2">';
-    a.teamContributions.forEach(function(x) {
+    // Calculate recent activity for each team member
+    var teamWithActivity = a.teamContributions.map(function(x) {
+      var recentTickets = 0;
+      var recentComments = 0;
+      
+      // Check tickets for recent activity
+      (x.ticketsCompleted || []).forEach(function(ticketId) {
+        var ticket = d.tickets.parent && d.tickets.parent.id === ticketId ? d.tickets.parent :
+                      (d.tickets.children || []).find(function(c) { return c.id === ticketId; });
+        if (ticket) {
+          if (isRecentActivity(ticket.resolvedDate) || isRecentActivity(ticket.updatedDate)) {
+            recentTickets++;
+          }
+        }
+      });
+      
+      // Check comments for recent activity
+      if (d.tickets.allComments) {
+        d.tickets.allComments.forEach(function(ic) {
+          ic.comments.forEach(function(c) {
+            if (c.author === x.person && isRecentActivity(c.createdDate)) {
+              recentComments++;
+            }
+          });
+        });
+      }
+      
+      return {
+        person: x,
+        recentTickets: recentTickets,
+        recentComments: recentComments,
+        hasRecentActivity: recentTickets > 0 || recentComments > 0
+      };
+    });
+    
+    // Sort: people with recent activity first
+    teamWithActivity.sort(function(a, b) {
+      if (a.hasRecentActivity && !b.hasRecentActivity) return -1;
+      if (!a.hasRecentActivity && b.hasRecentActivity) return 1;
+      return (b.recentTickets + b.recentComments) - (a.recentTickets + a.recentComments);
+    });
+    
+    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">Team Contributions <span class="text-xs text-green-400">🆕 = recent activity</span></h3><div class="grid grid-cols-2 gap-2">';
+    teamWithActivity.forEach(function(item) {
+      var x = item.person;
       var links = (x.ticketsCompleted||[]).map(function(i){return link(i);}).join(", ");
-      h += '<div class="bg-slate-700 rounded p-3"><div class="flex justify-between"><span class="font-medium">' + x.person + '</span>';
+      var recentBadge = item.hasRecentActivity ? '<span class="text-green-400 text-xs ml-2">🆕</span>' : '';
+      var recentInfo = item.hasRecentActivity ? 
+        '<span class="text-xs text-green-400">(' + item.recentTickets + ' recent tickets, ' + item.recentComments + ' recent comments)</span>' : '';
+      var recentBg = item.hasRecentActivity ? 'bg-green-900/20' : '';
+      h += '<div class="bg-slate-700 rounded p-3 ' + recentBg + '"><div class="flex justify-between"><span class="font-medium">' + x.person + recentBadge + '</span>';
       h += '<div><span class="text-purple-400 text-sm">' + (x.ticketsCompleted||[]).length + ' tickets</span>';
       if (x.commentCount) h += '<span class="text-amber-400 text-sm ml-2">' + x.commentCount + ' comments</span>';
       h += '</div></div>';
+      if (recentInfo) h += '<div class="text-xs mb-1">' + recentInfo + '</div>';
       h += '<p class="text-sm text-slate-400">' + (x.keyContributions||"") + '</p>';
       if (links) h += '<div class="text-xs text-slate-500 mt-1">' + links + '</div>';
       h += '</div>';
@@ -1542,20 +2256,61 @@ function renderAnalysis(d) {
     h += '</div></div>';
   }
   
-  // Work Breakdown
+  // Work Breakdown - show ALL tickets, highlight recent ones
   if (a.workBreakdown && a.workBreakdown.length) {
-    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">Work Breakdown</h3>';
+    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">Work Breakdown <span class="text-xs text-green-400">🆕 = resolved/updated in last 2 weeks</span></h3>';
     a.workBreakdown.forEach(function(w) {
+      // Get latest date for the category - use explicit date if provided, otherwise infer from tickets
+      var categoryDate = w.date || null;
+      if (!categoryDate && w.tickets && w.tickets.length) {
+        var dates = w.tickets.map(function(t) {
+          var ticket = d.tickets.parent && String(d.tickets.parent.id) === String(t.id) ? d.tickets.parent : 
+                        (d.tickets.children || []).find(function(c) { return String(c.id) === String(t.id); });
+          if (!ticket) return null;
+          if (ticket.resolvedDate) {
+            return ticket.resolvedDate;
+          }
+          return ticket.updatedDate || ticket.createdDate;
+        }).filter(function(d) { return d !== null; });
+        if (dates.length > 0) {
+          dates.sort(function(a, b) { return new Date(b) - new Date(a); });
+          categoryDate = dates[0];
+        }
+      }
+      var categoryDateInfo = categoryDate ? ' | Latest: ' + formatDate(categoryDate) : '';
       h += '<div class="bg-slate-700 rounded p-3 mb-2"><div class="flex justify-between mb-1"><span class="font-medium">' + w.category + '</span>';
       h += '<span class="text-sm px-2 py-0.5 rounded ' + (w.status=="Complete"?"bg-green-500/20 text-green-400":"bg-purple-500/20 text-purple-400") + '">' + (w.status||"") + '</span></div>';
-      h += '<p class="text-sm text-slate-400 mb-2">' + (w.description||"") + '</p>';
+      h += '<p class="text-sm text-slate-400 mb-2">' + (w.description||"") + categoryDateInfo + '</p>';
       if (w.tickets && w.tickets.length) {
         h += '<div class="space-y-1">';
+        // Show ALL tickets, not filtered - highlight recent ones
         w.tickets.forEach(function(t) {
-          h += '<div class="bg-slate-800 rounded p-2 text-sm flex items-center gap-2">' + link(t.id);
+          var ticket = d.tickets.parent && String(d.tickets.parent.id) === String(t.id) ? d.tickets.parent : 
+                        (d.tickets.children || []).find(function(c) { return String(c.id) === String(t.id); });
+          var isRecentResolved = ticket && ticket.resolvedDate && isRecentActivity(ticket.resolvedDate);
+          var isRecentUpdated = ticket && ticket.updatedDate && isRecentActivity(ticket.updatedDate);
+          var recentBadge = (isRecentResolved || isRecentUpdated) ? '<span class="text-green-400 ml-1">🆕</span>' : '';
+          var recentBg = (isRecentResolved || isRecentUpdated) ? 'bg-green-900/20' : '';
+          var dateInfo = '';
+          if (ticket) {
+            if (isRecentResolved && ticket.resolvedDate) {
+              dateInfo = ' | Resolved: ' + formatDate(ticket.resolvedDate);
+            } else if (isRecentUpdated && ticket.updatedDate) {
+              dateInfo = ' | Updated: ' + formatDate(ticket.updatedDate);
+            } else if (ticket.resolvedDate) {
+              dateInfo = ' | Resolved: ' + formatDate(ticket.resolvedDate);
+            } else if (ticket.updatedDate) {
+              dateInfo = ' | Updated: ' + formatDate(ticket.updatedDate);
+            } else if (ticket.createdDate) {
+              dateInfo = ' | Created: ' + formatDate(ticket.createdDate);
+            }
+          }
+          h += '<div class="bg-slate-800 rounded p-2 text-sm flex items-center gap-2 ' + recentBg + '">' + link(t.id) + recentBadge;
           h += '<span class="flex-1 truncate">' + t.title + '</span>';
           h += '<span class="text-xs text-slate-500">' + (t.assignee||"") + '</span>';
-          h += '<span class="text-xs px-2 py-0.5 rounded ' + (t.state=="Done"||t.state=="Closed"||t.state=="Resolved"?"bg-green-500/20 text-green-400":"bg-slate-600") + '">' + (t.state||"") + '</span></div>';
+          h += '<span class="text-xs px-2 py-0.5 rounded ' + (t.state=="Done"||t.state=="Closed"||t.state=="Resolved"?"bg-green-500/20 text-green-400":"bg-slate-600") + '">' + (t.state||"") + '</span>';
+          if (dateInfo) h += '<span class="text-xs text-slate-400">' + dateInfo + '</span>';
+          h += '</div>';
         });
         h += '</div>';
       }
@@ -1564,41 +2319,164 @@ function renderAnalysis(d) {
     h += '</div>';
   }
   
-  // Dependencies
+  // Dependencies - sort by date (recent first)
   if (a.dependencies && a.dependencies.length) {
-    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">Dependencies</h3>';
-    a.dependencies.forEach(function(dep) {
-      h += '<div class="bg-slate-700 rounded p-3 mb-2"><div class="flex justify-between"><span class="font-medium">' + linkify(dep.dependency) + '</span>';
+    // Get dates - use explicit date if provided, otherwise infer from related tickets
+    var depsWithDates = a.dependencies.map(function(dep) {
+      var date = dep.date || null;
+      var ticket = null;
+      if (!date && dep.relatedTicketId) {
+        var searchId = String(dep.relatedTicketId);
+        ticket = d.tickets.parent && String(d.tickets.parent.id) === searchId ? d.tickets.parent :
+         (d.tickets.children || []).find(function(c) { return String(c.id) === searchId; });
+        if (ticket) {
+          date = ticket.createdDate; // Use createdDate for when dependency was identified
+        }
+      } else if (dep.relatedTicketId) {
+        var searchId = String(dep.relatedTicketId);
+        ticket = d.tickets.parent && String(d.tickets.parent.id) === searchId ? d.tickets.parent :
+         (d.tickets.children || []).find(function(c) { return String(c.id) === searchId; });
+      }
+      return {
+        dep: dep,
+        date: date,
+        isRecent: date ? isRecentActivity(date) : (ticket ? (isRecentActivity(ticket.resolvedDate) || isRecentActivity(ticket.updatedDate)) : false)
+      };
+    });
+    
+    // Sort: recent first, then by date descending
+    depsWithDates.sort(function(a, b) {
+      var dateA = a.date ? new Date(a.date) : new Date(0);
+      var dateB = b.date ? new Date(b.date) : new Date(0);
+      if (a.isRecent && !b.isRecent) return -1;
+      if (!a.isRecent && b.isRecent) return 1;
+      return dateB - dateA;
+    });
+    
+    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">Dependencies <span class="text-xs text-green-400">🆕 = last 2 weeks</span></h3>';
+    depsWithDates.forEach(function(item) {
+      var dep = item.dep;
+      var recentBadge = item.isRecent ? '<span class="text-green-400 text-xs ml-2">🆕</span>' : '';
+      var dateInfo = item.date ? '<div class="text-xs text-slate-400 mt-1"><span class="text-cyan-400">🔗 Identified:</span> ' + formatDate(item.date) + '</div>' : '';
+      var recentBg = item.isRecent ? 'bg-green-900/20' : '';
+      h += '<div class="bg-slate-700 rounded p-3 mb-2 ' + recentBg + '"><div class="flex justify-between"><span class="font-medium">' + linkify(dep.dependency) + recentBadge + '</span>';
       h += '<span class="text-xs px-2 py-1 rounded ' + (dep.status=="Resolved"?"bg-green-500/20 text-green-400":"bg-amber-500/20 text-amber-400") + '">' + (dep.status||"") + '</span></div>';
       h += '<p class="text-sm text-slate-400">Type: ' + (dep.type||"N/A") + ' | Owner: ' + (dep.owner||"N/A") + '</p>';
       if (dep.relatedTicketId) h += '<div class="text-xs text-slate-500">Related: ' + link(dep.relatedTicketId) + '</div>';
+      h += dateInfo;
       h += '</div>';
     });
     h += '</div>';
   }
   
-  // Risks
+  // Risks - sort by date (recent first)
   if (a.risks && a.risks.length) {
-    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2 text-amber-400">Risks</h3>';
-    a.risks.forEach(function(r) {
-      h += '<div class="bg-slate-700 rounded p-3 mb-2 border-l-4 ' + (r.likelihood=="High"?"border-red-500":"border-amber-500") + '">';
-      h += '<div class="flex justify-between"><span class="font-medium">' + r.risk + '</span>';
+    // Get dates - use explicit date if provided, otherwise infer from source tickets or comments
+    var risksWithDates = a.risks.map(function(r) {
+      var date = r.date || null;
+      var ticket = null;
+      if (!date && r.sourceTicketId) {
+        var searchId = String(r.sourceTicketId);
+        ticket = d.tickets.parent && String(d.tickets.parent.id) === searchId ? d.tickets.parent :
+         (d.tickets.children || []).find(function(c) { return String(c.id) === searchId; });
+        if (ticket) {
+          date = ticket.resolvedDate || ticket.updatedDate || ticket.createdDate;
+        }
+      } else if (r.sourceTicketId) {
+        var searchId = String(r.sourceTicketId);
+        ticket = d.tickets.parent && String(d.tickets.parent.id) === searchId ? d.tickets.parent :
+         (d.tickets.children || []).find(function(c) { return String(c.id) === searchId; });
+      }
+      // Try to get date from comment if still no date
+      if (!date && r.sourceTicketId) {
+        date = getCommentDate(r.sourceTicketId, d, r.risk);
+      }
+      return {
+        risk: r,
+        date: date,
+        isRecent: date ? isRecentActivity(date) : (ticket ? (isRecentActivity(ticket.resolvedDate) || isRecentActivity(ticket.updatedDate)) : false)
+      };
+    });
+    
+    // Sort: recent first, then by date descending
+    risksWithDates.sort(function(a, b) {
+      var dateA = a.date ? new Date(a.date) : new Date(0);
+      var dateB = b.date ? new Date(b.date) : new Date(0);
+      if (a.isRecent && !b.isRecent) return -1;
+      if (!a.isRecent && b.isRecent) return 1;
+      return dateB - dateA;
+    });
+    
+    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2 text-amber-400">Risks <span class="text-xs text-green-400">🆕 = last 2 weeks</span></h3>';
+    risksWithDates.forEach(function(item) {
+      var r = item.risk;
+      var recentBadge = item.isRecent ? '<span class="text-green-400 text-xs ml-2">🆕</span>' : '';
+      // Get date from comment or ticket
+      var riskDate = getCommentDate(r.sourceTicketId, d, r.risk) || item.date;
+      var dateInfo = riskDate ? '<div class="text-xs text-slate-400 mt-1"><span class="text-amber-400">⚠ Highlighted:</span> ' + formatDate(riskDate) + '</div>' : '';
+      var recentBg = item.isRecent ? 'bg-green-900/20' : '';
+      h += '<div class="bg-slate-700 rounded p-3 mb-2 border-l-4 ' + (r.likelihood=="High"?"border-red-500":"border-amber-500") + ' ' + recentBg + '">';
+      h += '<div class="flex justify-between"><span class="font-medium">' + r.risk + recentBadge + '</span>';
       h += '<span class="text-xs px-2 py-1 rounded ' + (r.likelihood=="High"?"bg-red-500/20 text-red-400":"bg-amber-500/20 text-amber-400") + '">' + (r.likelihood||"") + '</span></div>';
       h += '<p class="text-sm text-slate-400">Impact: ' + (r.impact||"N/A") + '</p>';
       h += '<p class="text-sm text-green-400">Mitigation: ' + (r.mitigation||"N/A") + '</p>';
       if (r.sourceTicketId) h += '<div class="text-xs text-slate-500">Source: ' + link(r.sourceTicketId) + '</div>';
+      if (dateInfo) h += dateInfo;
       h += '</div>';
     });
     h += '</div>';
   }
   
-  // Blockers
+  // Blockers - sort by date (recent first)
   if (a.blockers && a.blockers.length) {
-    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2 text-red-400">Blockers</h3>';
-    a.blockers.forEach(function(b) {
-      h += '<div class="bg-slate-700 rounded p-3 mb-2 border-l-4 border-red-500">';
-      h += '<div class="font-medium">' + linkify(b.blocker) + '</div>';
+    // Get dates - use explicit date if provided, otherwise infer from blocker tickets or comments
+    var blockersWithDates = a.blockers.map(function(b) {
+      var date = b.date || null;
+      var ticket = null;
+      if (!date && b.ticket) {
+        var searchId = String(b.ticket);
+        ticket = d.tickets.parent && String(d.tickets.parent.id) === searchId ? d.tickets.parent :
+         (d.tickets.children || []).find(function(c) { return String(c.id) === searchId; });
+        if (ticket) {
+          date = ticket.resolvedDate || ticket.updatedDate || ticket.createdDate;
+        }
+      } else if (b.ticket) {
+        var searchId = String(b.ticket);
+        ticket = d.tickets.parent && String(d.tickets.parent.id) === searchId ? d.tickets.parent :
+         (d.tickets.children || []).find(function(c) { return String(c.id) === searchId; });
+      }
+      // Try to get date from comment if still no date
+      if (!date && b.ticket) {
+        date = getCommentDate(b.ticket, d, b.blocker);
+      }
+      return {
+        blocker: b,
+        date: date,
+        isRecent: date ? isRecentActivity(date) : (ticket ? (isRecentActivity(ticket.resolvedDate) || isRecentActivity(ticket.updatedDate)) : false)
+      };
+    });
+    
+    // Sort: recent first, then by date descending
+    blockersWithDates.sort(function(a, b) {
+      var dateA = a.date ? new Date(a.date) : new Date(0);
+      var dateB = b.date ? new Date(b.date) : new Date(0);
+      if (a.isRecent && !b.isRecent) return -1;
+      if (!a.isRecent && b.isRecent) return 1;
+      return dateB - dateA;
+    });
+    
+    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2 text-red-400">Blockers <span class="text-xs text-green-400">🆕 = last 2 weeks</span></h3>';
+    blockersWithDates.forEach(function(item) {
+      var b = item.blocker;
+      var recentBadge = item.isRecent ? '<span class="text-green-400 text-xs ml-2">🆕</span>' : '';
+      // Get date from comment or ticket
+      var blockerDate = getCommentDate(b.ticket, d, b.blocker) || item.date;
+      var dateInfo = blockerDate ? '<div class="text-xs text-slate-400 mt-1"><span class="text-red-400">🚫 Became blocker:</span> ' + formatDate(blockerDate) + '</div>' : '';
+      var recentBg = item.isRecent ? 'bg-green-900/20' : '';
+      h += '<div class="bg-slate-700 rounded p-3 mb-2 border-l-4 border-red-500 ' + recentBg + '">';
+      h += '<div class="font-medium">' + linkify(b.blocker) + recentBadge + '</div>';
       if (b.ticket) h += '<p class="text-sm text-slate-400">Ticket: ' + link(b.ticket) + '</p>';
+      if (dateInfo) h += dateInfo;
       if (b.resolution) h += '<p class="text-sm text-green-400">Resolution: ' + b.resolution + '</p>';
       if (b.mentionedInComments) h += '<div class="text-xs text-amber-400">Mentioned in comments</div>';
       h += '</div>';
@@ -1606,14 +2484,41 @@ function renderAnalysis(d) {
     h += '</div>';
   }
   
-  // Open Questions
+  // Open Questions - sort by date (recent first)
   if (a.openQuestions && a.openQuestions.length) {
-    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">Open Questions</h3>';
-    a.openQuestions.forEach(function(q) {
+    // Get dates from tickets
+    var questionsWithDates = a.openQuestions.map(function(q) {
+      var ticket = q.ticketId ? 
+        (d.tickets.parent && d.tickets.parent.id === q.ticketId ? d.tickets.parent :
+         (d.tickets.children || []).find(function(c) { return c.id === q.ticketId; })) : null;
+      return {
+        question: q,
+        date: ticket ? (ticket.updatedDate || ticket.createdDate) : null,
+        isRecent: ticket ? isRecentActivity(ticket.updatedDate || ticket.createdDate) : false
+      };
+    });
+    
+    // Sort: recent first, then by date descending
+    questionsWithDates.sort(function(a, b) {
+      var dateA = a.date ? new Date(a.date) : new Date(0);
+      var dateB = b.date ? new Date(b.date) : new Date(0);
+      if (a.isRecent && !b.isRecent) return -1;
+      if (!a.isRecent && b.isRecent) return 1;
+      return dateB - dateA;
+    });
+    
+    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">Open Questions <span class="text-xs text-green-400">🆕 = last 2 weeks</span></h3>';
+    questionsWithDates.forEach(function(item) {
+      var q = item.question;
       var sourceIcon = q.source === 'chat' ? '[Chat]' : '[Ticket]';
-      h += '<div class="bg-slate-700 rounded p-3 mb-2 border-l-4 border-yellow-500">';
-      h += '<div class="text-yellow-400">' + linkify(q.question) + ' <span class="text-xs">' + sourceIcon + '</span></div>';
-      h += '<div class="text-xs text-slate-400">Asked by: ' + (q.askedBy||"N/A") + ' | Ticket: ' + (q.ticketId ? link(q.ticketId) : "N/A");
+      var recentBadge = item.isRecent ? '<span class="text-green-400 text-xs ml-2">🆕</span>' : '';
+      // Get date from comment or ticket
+      var questionDate = getCommentDate(q.ticketId, d, q.question) || item.date;
+      var dateInfo = questionDate ? ' | Asked: ' + formatDate(questionDate) : '';
+      var recentBg = item.isRecent ? 'bg-green-900/20' : '';
+      h += '<div class="bg-slate-700 rounded p-3 mb-2 border-l-4 border-yellow-500 ' + recentBg + '">';
+      h += '<div class="text-yellow-400">' + linkify(q.question) + ' <span class="text-xs">' + sourceIcon + '</span>' + recentBadge + '</div>';
+      h += '<div class="text-xs text-slate-400">Asked by: ' + (q.askedBy||"N/A") + ' | Ticket: ' + (q.ticketId ? link(q.ticketId) : "N/A") + dateInfo;
       if (q.source) h += ' | Source: ' + q.source;
       h += '</div></div>';
     });
@@ -1773,33 +2678,76 @@ function renderAnalysis(d) {
     h += '</div>';
   }
   
-  // Next Steps
+  // Next Steps - keep all, but prioritize by priority (High/Urgent first)
   if (a.nextSteps && a.nextSteps.length) {
+    // Sort by priority: High/Urgent first, then others
+    var sortedNextSteps = a.nextSteps.slice().sort(function(a, b) {
+      var priorityA = (a.priority || '').toLowerCase();
+      var priorityB = (b.priority || '').toLowerCase();
+      var highA = priorityA.includes('high') || priorityA.includes('urgent') || priorityA.includes('critical');
+      var highB = priorityB.includes('high') || priorityB.includes('urgent') || priorityB.includes('critical');
+      if (highA && !highB) return -1;
+      if (!highA && highB) return 1;
+      return 0;
+    });
+    
     h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">Next Steps</h3>';
-    a.nextSteps.forEach(function(n) {
+    sortedNextSteps.forEach(function(n) {
+      // Try to find date from ticket if action mentions a ticket ID
+      var nextStepDate = null;
+      if (n.ticketId) {
+        nextStepDate = getTicketDate(n.ticketId, d, false);
+      } else if (n.action) {
+        // Try to extract ticket ID from action text
+        var ticketMatch = n.action.match(/\b[A-Z]+-\d+\b/);
+        if (ticketMatch) {
+          nextStepDate = getTicketDate(ticketMatch[0], d, false);
+        }
+      }
+      var dateInfo = nextStepDate ? ' | Identified: ' + formatDate(nextStepDate) : '';
       h += '<div class="bg-slate-700 rounded p-3 mb-2 flex justify-between"><div>';
       h += '<div class="font-medium">' + linkify(n.action) + '</div>';
-      h += '<div class="text-sm text-slate-400">Owner: ' + (n.owner||"N/A") + '</div></div>';
+      h += '<div class="text-sm text-slate-400">Owner: ' + (n.owner||"N/A") + dateInfo + '</div></div>';
       h += '<span class="text-purple-400">' + (n.priority||"") + '</span></div>';
     });
     h += '</div>';
   }
   
-  // Comments Section
+  // Comments Section - only show comments from last 2 weeks
   if (d.tickets.allComments && d.tickets.allComments.length) {
-    h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">All Comments (' + stats.totalComments + ')</h3>';
+    // Filter to only recent comments
+    var recentCommentsCount = 0;
+    var recentCommentsByIssue = [];
     d.tickets.allComments.forEach(function(ic) {
-      h += '<div class="bg-slate-700 rounded p-3 mb-3">';
-      h += '<div class="font-medium text-purple-400 mb-2">' + link(ic.issueId) + ' - ' + ic.issueTitle + '</div>';
-      ic.comments.forEach(function(c) {
-        h += '<div class="bg-slate-800 rounded p-2 mb-2 ml-4 border-l-2 border-slate-600">';
-        h += '<div class="flex justify-between text-xs text-slate-400 mb-1"><span class="font-medium text-slate-300">' + c.author + '</span>';
-        h += '<span>' + formatDate(c.createdDate) + '</span></div>';
-        h += '<div class="text-sm text-slate-300">' + stripHtml(c.text) + '</div></div>';
+      var recentComments = (ic.comments || []).filter(function(c) {
+        return isRecentActivity(c.createdDate);
+      });
+      if (recentComments.length > 0) {
+        recentCommentsCount += recentComments.length;
+        recentCommentsByIssue.push({
+          issueId: ic.issueId,
+          issueTitle: ic.issueTitle,
+          comments: recentComments
+        });
+      }
+    });
+    
+    if (recentCommentsCount > 0) {
+      h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">All Comments (' + recentCommentsCount + ' from last 2 weeks)</h3>';
+      recentCommentsByIssue.forEach(function(ic) {
+        h += '<div class="bg-slate-700 rounded p-3 mb-3">';
+        h += '<div class="font-medium text-purple-400 mb-2">' + link(ic.issueId) + ' - ' + ic.issueTitle + '</div>';
+        ic.comments.forEach(function(c) {
+          var recentBadge = '<span class="text-green-400 text-xs ml-2">🆕</span>';
+          h += '<div class="bg-slate-800 rounded p-2 mb-2 ml-4 border-l-2 border-green-500 bg-green-900/20">';
+          h += '<div class="flex justify-between text-xs text-slate-400 mb-1"><span class="font-medium text-slate-300">' + c.author + recentBadge + '</span>';
+          h += '<span>' + formatDate(c.createdDate) + '</span></div>';
+          h += '<div class="text-sm text-slate-300">' + stripHtml(c.text) + '</div></div>';
+        });
+        h += '</div>';
       });
       h += '</div>';
-    });
-    h += '</div>';
+    }
   }
   
   // YouTrack Dependencies
@@ -1812,18 +2760,73 @@ function renderAnalysis(d) {
     h += '</table></div>';
   }
   
-  // All Tickets Table
-  h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">All Tickets</h3>';
-  h += '<table class="w-full text-sm"><tr class="text-left text-slate-400 border-b border-slate-700"><th class="p-2">ID</th><th class="p-2">Title</th><th class="p-2">Type</th><th class="p-2">State</th><th class="p-2">Assignee</th><th class="p-2">Comments</th></tr>';
+  // All Tickets Table - sort by date (recent first)
+  h += '<div class="bg-slate-800 rounded-xl p-4 mb-4"><h3 class="text-xl font-bold mb-2">All Tickets <span class="text-xs text-green-400">🆕 = resolved/updated in last 2 weeks</span></h3>';
+  h += '<table class="w-full text-sm"><tr class="text-left text-slate-400 border-b border-slate-700"><th class="p-2">ID</th><th class="p-2">Title</th><th class="p-2">Type</th><th class="p-2">State</th><th class="p-2">Assignee</th><th class="p-2">Comments</th><th class="p-2">Activity</th></tr>';
+  
+  // Prepare all tickets with dates for sorting
+  var allTickets = [];
   var p = d.tickets.parent;
-  var parentCommentCount = (p.comments||[]).length;
-  h += '<tr class="border-b border-slate-700 bg-slate-700/30"><td class="p-2">' + link(p.id) + '</td><td class="p-2">' + (p.title||'') + '</td><td class="p-2">' + (p.type||'') + '</td><td class="p-2">' + (p.state||'Unknown') + '</td><td class="p-2">' + (p.assignee||'Unassigned') + '</td><td class="p-2 text-amber-400">' + parentCommentCount + '</td></tr>';
-  d.tickets.children.forEach(function(t) {
+  if (p) {
+    var parentDate = p.resolvedDate || p.updatedDate || p.createdDate;
+    var parentRecentResolved = isRecentActivity(p.resolvedDate);
+    var parentRecentUpdated = !parentRecentResolved && isRecentActivity(p.updatedDate);
+    allTickets.push({
+      ticket: p,
+      date: parentDate,
+      isRecent: parentRecentResolved || parentRecentUpdated,
+      isParent: true
+    });
+  }
+  
+  if (d.tickets.children) {
+    d.tickets.children.forEach(function(t) {
+      var ticketDate = t.resolvedDate || t.updatedDate || t.createdDate;
+      var recentResolved = isRecentActivity(t.resolvedDate);
+      var recentUpdated = !recentResolved && isRecentActivity(t.updatedDate);
+      allTickets.push({
+        ticket: t,
+        date: ticketDate,
+        isRecent: recentResolved || recentUpdated,
+        isParent: false
+      });
+    });
+  }
+  
+  // Sort: recent first, then by date descending
+  allTickets.sort(function(a, b) {
+    var dateA = a.date ? new Date(a.date) : new Date(0);
+    var dateB = b.date ? new Date(b.date) : new Date(0);
+    if (a.isRecent && !b.isRecent) return -1;
+    if (!a.isRecent && b.isRecent) return 1;
+    return dateB - dateA;
+  });
+  
+  // Render sorted tickets
+  allTickets.forEach(function(item) {
+    var t = item.ticket;
     var commentCount = (t.comments||[]).length;
     var state = t.state || 'Unknown';
     var assignee = t.assignee || 'Unassigned';
     var type = t.type || 'Issue';
-    h += '<tr class="border-b border-slate-700"><td class="p-2">' + link(t.id) + '</td><td class="p-2">' + (t.title||'') + '</td><td class="p-2">' + type + '</td><td class="p-2 ' + (state=="Done"||state=="Closed"||state=="Resolved"?"text-green-400":"") + '">' + state + '</td><td class="p-2">' + assignee + '</td><td class="p-2 text-amber-400">' + commentCount + '</td></tr>';
+    var recentResolved = isRecentActivity(t.resolvedDate);
+    var recentUpdated = !recentResolved && isRecentActivity(t.updatedDate);
+    var recentBadge = (recentResolved || recentUpdated) ? '<span class="text-green-400">🆕</span>' : '';
+    var activity = '';
+    if (recentResolved && t.resolvedDate) {
+      activity = 'Resolved: ' + formatDate(t.resolvedDate);
+    } else if (recentUpdated && t.updatedDate) {
+      activity = 'Updated: ' + formatDate(t.updatedDate);
+    } else if (t.resolvedDate) {
+      activity = 'Resolved: ' + formatDate(t.resolvedDate);
+    } else if (t.updatedDate) {
+      activity = 'Updated: ' + formatDate(t.updatedDate);
+    } else if (t.createdDate) {
+      activity = 'Created: ' + formatDate(t.createdDate);
+    }
+    var rowClass = item.isParent ? 'bg-slate-700/30' : '';
+    if (recentResolved || recentUpdated) rowClass += ' bg-green-900/20';
+    h += '<tr class="border-b border-slate-700 ' + rowClass + '"><td class="p-2">' + link(t.id) + recentBadge + '</td><td class="p-2">' + (t.title||'') + '</td><td class="p-2">' + type + '</td><td class="p-2 ' + (state=="Done"||state=="Closed"||state=="Resolved"?"text-green-400":"") + '">' + state + '</td><td class="p-2">' + assignee + '</td><td class="p-2 text-amber-400">' + commentCount + '</td><td class="p-2 text-xs text-slate-400">' + activity + '</td></tr>';
   });
   h += '</table></div>';
   
@@ -1839,28 +2842,29 @@ function renderAnalysis(d) {
 }
 
 async function run() {
-  var url = document.getElementById("url").value;
-  if (!url) return alert("Enter YouTrack URL");
-  
-  var chatExport = document.getElementById("chatExport").value.trim();
-  var webhookUrl = document.getElementById("webhookUrl").value.trim();
-  
-  console.log('=== BROWSER DEBUG ===');
-  console.log('URL:', url);
-  console.log('Chat export length:', chatExport.length, 'characters');
-  console.log('Webhook URL:', webhookUrl ? 'Provided' : 'Not provided');
-  console.log('First 100 chars of chat:', chatExport.substring(0, 100));
-  console.log('=====================');
-  
-  document.getElementById("btn").disabled = true;
-  document.getElementById("btn").textContent = "Crawling...";
-  var statusMsg = "Fetching tickets, comments" + (chatExport ? ", and parsing Google Chat export" : "") + "...";
-  if (webhookUrl) statusMsg += " Will send summary to Google Chat when complete.";
-  document.getElementById("status").textContent = statusMsg;
+  var statusEl = document.getElementById("status");
+  var btnEl = document.getElementById("btn");
+  var url = (document.getElementById("url").value || "").trim();
+  if (!url) {
+    statusEl.textContent = "Please enter a YouTrack URL.";
+    statusEl.classList.add("text-amber-400");
+    return;
+  }
+  statusEl.classList.remove("text-amber-400", "text-red-400");
+  statusEl.textContent = "Starting…";
+  btnEl.disabled = true;
+  btnEl.textContent = "Crawling…";
   document.getElementById("results").innerHTML = "";
   document.getElementById("chatBox").classList.add("hidden");
   document.getElementById("chatLog").innerHTML = "";
   DATA = null;
+  
+  var chatExport = document.getElementById("chatExport").value.trim();
+  var webhookUrl = document.getElementById("webhookUrl").value.trim();
+  var statusMsg = "Fetching tickets and comments…";
+  if (chatExport) statusMsg += " (with chat export)";
+  if (webhookUrl) statusMsg += " Will post to Google Chat when done.";
+  statusEl.textContent = statusMsg;
   
   try {
     var res = await fetch("/api/analyze", {
@@ -1873,12 +2877,15 @@ async function run() {
       })
     });
     var d = await res.json();
+    if (!res.ok) {
+      throw new Error(d.error || "Server error: " + res.status + " " + res.statusText);
+    }
     if (d.error) throw new Error(d.error);
     
     DATA = d;
-    BASE = d.tickets.baseUrl;
-    var stats = d.tickets.stats || {};
-    var statusText = "Done! " + (d.tickets.children.length + 1) + " tickets, " + (stats.totalComments || 0) + " comments, " + (stats.totalRelated || 0) + " related, " + (stats.totalDependencies || 0) + " dependencies";
+    BASE = (d.tickets && d.tickets.baseUrl) || "";
+    var stats = (d.tickets && d.tickets.stats) || {};
+    var statusText = "Done! " + ((d.tickets && d.tickets.children && d.tickets.children.length + 1) || 0) + " tickets, " + (stats.totalComments || 0) + " comments, " + (stats.totalRelated || 0) + " related, " + (stats.totalDependencies || 0) + " dependencies";
     if (d.chatSent) {
       statusText += " ✅ Message sent to Google Chat!";
     } else if (d.chatError) {
@@ -1886,18 +2893,25 @@ async function run() {
     } else if (webhookUrl) {
       statusText += " (No webhook URL provided)";
     }
-    document.getElementById("status").textContent = statusText;
+    statusEl.textContent = statusText;
     document.getElementById("chatBox").classList.remove("hidden");
     
     renderAnalysis(d);
   } catch(e) {
-    document.getElementById("status").textContent = "Error: " + e.message;
-    console.error(e);
+    statusEl.textContent = "Error: " + e.message;
+    statusEl.classList.add("text-red-400");
+    console.error("run() error:", e);
   }
-  document.getElementById("btn").disabled = false;
-  document.getElementById("btn").textContent = "Crawl and Generate Report";
+  btnEl.disabled = false;
+  btnEl.textContent = "Crawl and Generate Report";
 }
 `;
+
+app.get('/youtrack-app.js', function(req, res) {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.set('Content-Type', 'application/javascript; charset=utf-8');
+  res.send(clientScript);
+});
 
 app.get('/', function(req, res) {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -1941,8 +2955,9 @@ app.get('/', function(req, res) {
           <input type="text" id="webhookUrl" placeholder="https://chat.googleapis.com/v1/spaces/..." class="w-full bg-slate-700 rounded-lg p-3 border border-slate-600 text-sm font-mono" value="https://chat.googleapis.com/v1/spaces/AAQAvpwMxHw/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=PflqgfVy7hhfJVSXXoXmiXDf6VJpptBn3ZSdeta2B00">
           <div class="text-xs text-slate-500 mt-1">Enter a Google Chat webhook URL to send a formatted summary message to the channel after analysis completes.</div>
         </div>
-        <button onclick="run()" id="btn" class="w-full py-3 bg-purple-600 hover:bg-purple-500 rounded-lg font-medium">Crawl and Generate Report</button>
+        <button type="button" id="btn" class="w-full py-3 bg-purple-600 hover:bg-purple-500 rounded-lg font-medium">Crawl and Generate Report</button>
         <div id="status" class="mt-3 text-sm text-slate-400"></div>
+        <p class="mt-2 text-xs text-slate-500">Use this page at <strong>http://localhost:3001</strong> (start the server with <code class="bg-slate-700 px-1 rounded">node youtrack.js</code> first).</p>
       </div>
       
       <div id="chatBox" class="hidden bg-slate-800 rounded-xl p-4 mb-4">
@@ -1968,9 +2983,17 @@ app.get('/', function(req, res) {
     </div>
   </div>
   
-<script>
-${clientScript}
-</script>
+  <script>
+    document.getElementById("status").textContent = "Loading...";
+    document.getElementById("btn").addEventListener("click", function() {
+      if (typeof run === "function") run();
+      else document.getElementById("status").textContent = "App not loaded yet. Check console (F12) for errors.";
+    });
+  </script>
+  <script src="/youtrack-app.js"></script>
+  <script>
+    if (document.getElementById("status").textContent === "Loading...") document.getElementById("status").textContent = "";
+  </script>
 </body>
 </html>`);
 });

@@ -50,6 +50,35 @@ node youtrack.js
 - ADO: http://localhost:3000
 - YouTrack: http://localhost:3001
 
+### Bi-Weekly Executive Report (biweekly-report.js)
+
+Generates a formatted Word (.docx) bi-weekly status update for the Q1 Bundle Premium Profiles & Network Footprint workstream by aggregating multiple YouTrack and ADO tickets (including child tickets, comments, and descriptions).
+
+**Prerequisites:** Start both `server.js` (ADO) and `youtrack.js` (YouTrack) first.
+
+1. Run the report server:
+```bash
+npm run start:report
+# or
+node biweekly-report.js
+```
+
+2. Open http://localhost:3002
+
+3. Enter the report date (e.g. 2/2/2026).
+
+4. Enter **YouTrack ticket IDs or URLs** (one per line), e.g.:
+   - `UNSER-1141`
+   - `CSMR-15266`
+   - or full URL: `https://youtrack.internetbrands.com/issue/UNSER-1141`
+
+5. Enter **ADO ticket URLs** (one per line), e.g.:
+   - `https://dev.azure.com/org/project/_workitems/edit/12345`
+
+6. Click **Fetch tickets only** to preview fetched data, or **Generate report (.docx)** to generate and download the Word report.
+
+The report follows the Q1 Bundle bi-weekly template: Executive Summary, Overall Health, Key Milestones, Scope, Schedules, Project Status, Up Next, Decisions Pending, Appendix (Project Completion Summary, Key Technical Decisions, Team Updates).
+
 ## Usage
 
 1. Paste a work item/issue URL into the input field

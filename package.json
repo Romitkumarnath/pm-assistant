@@ -7,8 +7,10 @@
     "start": "node server.js",
     "start:ado": "node server.js",
     "start:youtrack": "node youtrack.js",
+    "start:report": "node biweekly-report.js",
     "dev:ado": "node --watch server.js",
     "dev:youtrack": "node --watch youtrack.js",
+    "dev:report": "node --watch biweekly-report.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -17,6 +19,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
     "axios": "^1.13.2",
+    "docx": "^9.5.1",
     "dotenv": "^17.2.3",
     "express": "^5.2.1"
   }
