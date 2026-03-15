@@ -1,0 +1,19 @@
+Subject: Lawyer Directory Open Related Tickets Report (Frontend + Backend)
+
+Team,
+
+Attached is the latest open related tickets report for Lawyer Directory (Frontend + Backend).
+
+- Total open related tickets: 175
+- Unassigned tickets: 41
+- High-risk tickets from comment signals: 9
+
+The report includes:
+- what each bug is about,
+- assignment status and days open,
+- MVP signal when mentioned in ticket/comments,
+- risk callouts derived from comment discussions.
+
+Please prioritize assigning unowned bugs and confirm risk/blocked items in triage.
+
+Thanks
