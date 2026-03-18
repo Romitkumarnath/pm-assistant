@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<body style="font-family: Calibri, Arial, sans-serif; font-size: 14px; color: #333; line-height: 1.5;">
+
+<p>Hi Team,</p>
+
+<p>Below is the latest E2E testing status for Q1 Authority Bundles as of <strong>March 15, 2026</strong>. We are currently in <strong>Round 4</strong> of end-to-end testing across 23 test cases spanning both <strong>[FindLaw]</strong> and <strong>[MAC]</strong> platforms. The final 4 accounts (FL_TC14, FL_TC19, FL_TC20, FL_TC21) were provisioned on March 12–13, and FL feature testing for E2E is expected to begin Monday, March 17.</p>
+
+<h3 style="color: #2c3e50; border-bottom: 1px solid #ddd; padding-bottom: 4px;">Overall Status Summary</h3>
+
+<table style="border-collapse: collapse; width: 100%; margin-bottom: 16px;">
+  <tr style="background-color: #f2f2f2;">
+    <th style="border: 1px solid #ccc; padding: 6px 10px; text-align: left;">Status</th>
+    <th style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">Count</th>
+    <th style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">%</th>
+  </tr>
+  <tr>
+    <td style="border: 1px solid #ccc; padding: 6px 10px;">✅ E2E Pass</td>
+    <td style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">3</td>
+    <td style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">13%</td>
+  </tr>
+  <tr>
+    <td style="border: 1px solid #ccc; padding: 6px 10px;">✔️ Pass (Component-level)</td>
+    <td style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">1</td>
+    <td style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">4%</td>
+  </tr>
+  <tr>
+    <td style="border: 1px solid #ccc; padding: 6px 10px;">🔄 Retest Required</td>
+    <td style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">2</td>
+    <td style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">9%</td>
+  </tr>
+  <tr>
+    <td style="border: 1px solid #ccc; padding: 6px 10px;">⏳ In Progress</td>
+    <td style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">1</td>
+    <td style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">4%</td>
+  </tr>
+  <tr>
+    <td style="border: 1px solid #ccc; padding: 6px 10px;">⏸️ On Hold (Blocked)</td>
+    <td style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">14</td>
+    <td style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">61%</td>
+  </tr>
+  <tr>
+    <td style="border: 1px solid #ccc; padding: 6px 10px;">🔲 Not Started</td>
+    <td style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">2</td>
+    <td style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">9%</td>
+  </tr>
+  <tr style="background-color: #f2f2f2; font-weight: bold;">
+    <td style="border: 1px solid #ccc; padding: 6px 10px;">Total</td>
+    <td style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">23</td>
+    <td style="border: 1px solid #ccc; padding: 6px 10px; text-align: center;">100%</td>
+  </tr>
+</table>
+
+<p><strong>In short:</strong> 4 of 23 test cases (17%) have passed at component or E2E level, while 61% remain on hold — primarily blocked by upstream feature deployments and test data provisioning. FL feature testing is expected to resume Monday (3/17), which should begin clearing the held cases through the pipeline.</p>
+
+<h3 style="color: #2c3e50; border-bottom: 1px solid #ddd; padding-bottom: 4px;">What's Working</h3>
+
+<p><strong>[FindLaw]</strong> FL_TC14 (E2E PASS, 3/9) — Full end-to-end pass for an Authority Foundation bundle sold through FindLaw SF to an existing customer. This validates the complete Sale → Matching Tool → COB → Pass to MAC SF → Account Setup workflow for FL-initiated sales.</p>
+
+<p><strong>[FindLaw]</strong> FL_TC16 (E2E PASS, 3/10) and FL_TC21 (E2E PASS, 3/11) — Both completed full E2E passes. FL_TC21 specifically validated a MAC SF-initiated Authority Foundation bundle, confirming the cross-platform handoff from MAC SF back to FindLaw systems.</p>
+
+<p><strong>[FindLaw]</strong> FL_TC17 (Pass, 3/10) — Component-level pass confirmed at the FL SF QA stage.</p>
+
+<p>These passes confirm that the core sale-to-fulfillment pipeline is functional for both FL-initiated and MAC-initiated Authority Foundation bundles. The Matching Tool (Mikalai), COB (Bharghavi), and Pass to MAC SF workflows are all operational.</p>
+
+<h3 style="color: #2c3e50; border-bottom: 1px solid #ddd; padding-bottom: 4px;">Where We're Stuck</h3>
+
+<p><strong>[FindLaw] Test cases FL_TC01–TC05 and FL_TC06–TC10 (10 cases, On Hold):</strong> These are blocked pending completion of mandatory field validation and quote submission steps. Per the E2E test data sheet, TC01–TC05 require filling all mandatory fields on Quote and "Review and Submit" order processing (hold since 3/5). TC06–TC10 are blocked at the "Ready to add products" stage (hold since 3/6). These cases cannot proceed until upstream FL feature testing resumes — which Trey Moore confirmed will start Monday morning (3/17).</p>
+
+<p><strong>[FindLaw] FL_TC11 and FL_TC12 (Retest Required):</strong> Both reached "Quote Stage Updated to Proposal" and triggered MAC Q1 Bundle Product Order Processing case creation, but require retesting after fixes deployed on 3/9. These should be re-run once FL feature testing resumes.</p>
+
+<p><strong>[FindLaw/MAC] FL_TC13 (In Progress) and FL_TC15 (On Hold):</strong> FL_TC13 is an ACH/Recurly/Sync Billing test case that remains in progress since 3/9. FL_TC15 is a repeat of TC13 scenario currently on hold since 3/10.</p>
+
+<p><strong>[MAC] Avvo Profile Mapping & Ngage Setup:</strong> A key blocker surfaced this week — Org ID and Avvo Professional IDs were not populated for Q-00431601 / WLD 4959385. KC Levesque and Bharghavi Suresh worked with Jesus Madrigal and Trevor Hawkins to identify the correct Avvo PID (1843520) and map it via the Profile Match tool. Trevor confirmed all matching is done via the Profile Match tool in PU, not directly in DB. The LawInfo UUID for WLD 4959385 was matched to e9f99287-f640-4b28-8af0-fd99600cb57e. Ngage setup information has been sent to Kendra Downing for both FL-initiated and MAC-initiated orders.</p>
+
+<p><strong>[FindLaw] Wrike Order Validation:</strong> Justin Karch flagged ADO #247908 — order validation tasks for Q1 bundles are not being created in Wrike, which is blocking E2E testing. This was escalated to Doug Heger and is being prioritized for resolution.</p>
+
+<h3 style="color: #2c3e50; border-bottom: 1px solid #ddd; padding-bottom: 4px;">Active Risks &amp; Blockers</h3>
+
+<p><strong>1. [FindLaw] E2E Blockers on ADO Dashboard (2 items):</strong></p>
+<ul>
+  <li><strong>Tags Placeholder #3</strong> (McNitt, New) — Unresolved, status: New</li>
+  <li><strong>ADO #247908: Order validation tasks for Q1 bundles not created in Wrike</strong> (Hougard, Ready) — Confirmed blocking E2E by Justin Karch. Shared with KC Levesque and Doug Heger. 26.3.2 releases Sunday (3/15), so a fix in that release window is unlikely per Romit's assessment.</li>
+</ul>
+
+<p><strong>2. [FindLaw] Critical for MVP — ADO Dashboard (13 items):</strong></p>
+<ul>
+  <li><strong>Categorize all reviews Prod</strong> (Shea, Active) — AI summarization/categorization bulk run kicked off in prod on 3/10</li>
+  <li><strong>Update Bundle toggles</strong> (Belski, Ready)</li>
+  <li><strong>Fix RRAdmin/admin category UI</strong> (Shea, Active/Bug)</li>
+  <li><strong>Enhance Review Categorization queue messages</strong> (Schultz, Active)</li>
+  <li><strong>[QA][Profile Bundling] ESS profile inconsistency</strong> (Singh, Active/Bug)</li>
+  <li><strong>Apply martindalePersonalId to SearchAPI filter for Ngage Chats</strong> (Hougard, Code Review)</li>
+  <li><strong>[Profile Bundling] Summary for ACC/ESS dropped after re-indexing</strong> (Salwei, Ready)</li>
+  <li><strong>Activity Stream: Update WLDID logic to exclude MAC properties</strong> (Killeen, Active)</li>
+  <li><strong>Update pageType on /reviews page</strong> (New)</li>
+</ul>
+
+<p><strong>3. [MAC] E2E Blockers on YouTrack Dashboard (3 items):</strong></p>
+<ul>
+  <li><strong>MHLDCD-16281:</strong> LDC &amp; MDC Non-prod pulling FL Prod Launch script — Deployed to Staging (Daniel Paschal)</li>
+  <li><strong>MDCD-11235:</strong> MDC add new property to fldatalayer — Deployed to Staging (Sebastian Mercado)</li>
+  <li><strong>LDCD-16207:</strong> LDC add new property to fldatalayer — Deployed to Staging (Sebastian Mercado)</li>
+</ul>
+
+<p><strong>4. [MAC] Critical for MVP — YouTrack (6 items):</strong></p>
+<ul>
+  <li><strong>MAC-1968:</strong> UAT Feedback — Fulfillment, Open (Sai Vihari Ravulapati)</li>
+  <li><strong>LDCD-16246:</strong> SPIKE check if zip code being passed — Deployed to Production (Sebastian Mercado) ✅</li>
+  <li><strong>CSMR-15953:</strong> Q1 bundle Messages Integration adobeVisitorId missing — Deployed to Production (Andres Canales) ✅</li>
+  <li><strong>MDCD-11237:</strong> FormUrl missing from MDC contact form payload for bundle customers — Approved on Staging, Showstopper (Gegham Movses)</li>
+  <li><strong>CSMR-15959:</strong> [UAT] Invoca Double-Hop Insight Verification — Open, Unassigned</li>
+  <li><strong>LDCD-16188:</strong> [Profile] Adobe Beacons not firing — Approved on Staging (Gegham Movses)</li>
+</ul>
+
+<p><strong>5. [MAC] E2E Bug Triage (resolved this week):</strong></p>
+<ul>
+  <li><strong>AJ-11594</strong> and <strong>AJ-11595</strong> — Both reported, resolved, re-tested, and closed on 3/13. These were Avvo AJ-side bugs that did not block continued E2E testing.</li>
+</ul>
+
+<p><strong>6. [FindLaw] Firm Name Encoding Issue:</strong> Bharghavi reported that the law firm name in the provisioning email does not match the field in the chat tab for some profiles. Doug Heger identified it as a special character encoding issue (&amp; symbol). ADO #247907 created under Order Fulfillment board.</p>
+
+<h3 style="color: #2c3e50; border-bottom: 1px solid #ddd; padding-bottom: 4px;">Key Activity This Week (from Google Chat &amp; Airtable)</h3>
+
+<p><strong>[FindLaw/MAC] Final 4 Accounts Provisioned (3/12–3/13):</strong> Praveen Yadagude confirmed that the final 4 accounts are ready — FL_TC14 &amp; FL_TC21 (FL SF Initiated), FL_TC19 &amp; FL_TC20 (MAC SF Initiated). All 4 rows successfully loaded to Tracker DB. For MAC-initiated orders, Bharghavi is mapping orders to MAC subscriptions.</p>
+
+<p><strong>[MAC] ProVantage Cancellation (3/13):</strong> Trey Moore requested Namachivayam Mohan initiate cancellation of ProVantage from MAC SF for FL_TC19 (WLD 4959385, Org ID 157203623, Avvo CID 13519). Nama confirmed — Done.</p>
+
+<p><strong>[FindLaw] Profile Redesign Rollout (3/15):</strong> GO for release on 3/15 as part of 26.3.2 deployment.</p>
+
+<p><strong>[FindLaw] Accelerator &amp; Essential FL Profile Types:</strong> Complete and deployed, but toggled off pending E2E validation.</p>
+
+<p><strong>[FindLaw] Cross-Network Badging:</strong> Last story completed, planned for 26.3.2.</p>
+
+<p><strong>[FindLaw] Attorney Listings on FL SRPs:</strong> Down to 9 stories + 4 bugs remaining.</p>
+
+<p><strong>[FindLaw] Dynamic AI Intake Form on Firmsites:</strong> End date updated for 26.3.2; disclaimer work larger than anticipated.</p>
+
+<p><strong>[MAC] Invoca Double-Hop:</strong> Avvo Invoca status — test run start pending new changes for MAC transactions/traffic going to Avvo Staging. PIDs set up for Invoca on Avvo Staging: 1199854, 4479076.</p>
+
+<h3 style="color: #2c3e50; border-bottom: 1px solid #ddd; padding-bottom: 4px;">Next Steps</h3>
+
+<ul>
+  <li><strong>[FindLaw] FL Feature Testing Resumes Monday 3/17:</strong> Per Trey Moore — "FL feature testing for E2E should be able to start Monday morning." This is the critical gate for unblocking the 14 held test cases.</li>
+  <li><strong>[FindLaw] Resolve ADO #247908</strong> (Wrike order validation) — Doug Heger to prioritize; currently blocking E2E.</li>
+  <li><strong>[MAC] Promote E2E Blockers to Production:</strong> MHLDCD-16281, MDCD-11235, LDCD-16207 are all deployed to staging and need production deployment.</li>
+  <li><strong>[MAC] Resolve MDCD-11237</strong> (FormUrl missing from MDC contact form) — Showstopper, approved on staging, needs promotion.</li>
+  <li><strong>[MAC] Assign &amp; Begin CSMR-15959</strong> (Invoca Double-Hop Insight Verification) — Currently unassigned.</li>
+  <li><strong>[FindLaw/MAC] Complete Ngage Setup:</strong> Kendra Downing to fulfill Ngage chat setup for all 4 E2E orders (both FL and Avvo sides).</li>
+  <li><strong>[FindLaw/MAC] Re-run FL_TC11 &amp; FL_TC12:</strong> Both marked for retest after Monday's FL feature testing restart.</li>
+  <li><strong>[FindLaw] Begin FL_TC22 &amp; FL_TC23:</strong> Not yet started — can begin once upstream blockers clear.</li>
+</ul>
+
+<p>Best regards,<br>Romit Nath</p>
+
+</body>
+</html>

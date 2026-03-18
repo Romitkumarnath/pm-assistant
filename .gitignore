@@ -32,3 +32,25 @@ Thumbs.db
 *.tmp
 *.temp
 
+# Google OAuth credentials and tokens (NEVER commit these)
+oauth_credentials.json
+token.json
+
+# Script output and log files
+gchat_log.txt
+gchat_stderr.txt
+gchat_stdout.txt
+refresh_err.txt
+refresh_out.txt
+
+# Chat transcripts (may contain sensitive content)
+avvo_consumer_club.txt
+mac_tech_chat.txt
+*.txt
+
+# Claude Code memory and config (personal)
+.claude/
+
+# Generated executive communications (project-sensitive)
+exec-comms/
+

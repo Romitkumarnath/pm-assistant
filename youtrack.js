@@ -29,7 +29,7 @@ const headers = {
 
 // Persistent history storage
 const HISTORY_FILE = path.join(__dirname, 'youtrack-history.json');
-const MAX_HISTORY = 50;
+const MAX_HISTORY = 20;
 
 function loadHistoryFromFile() {
   try {
@@ -101,260 +101,7 @@ function parseYouTrackUrl(url) {
   return null;
 }
 
-function parseGoogleChatUrl(url) {
-  // Parse Google Chat API URL
-  // Format: https://chat.googleapis.com/v1/spaces/SPACE_ID/messages?key=API_KEY&token=TOKEN
-  try {
-    const urlObj = new URL(url);
-    const pathMatch = urlObj.pathname.match(/\/spaces\/([^\/]+)/);
-    const apiKey = urlObj.searchParams.get('key');
-    const token = urlObj.searchParams.get('token');
-    
-    if (pathMatch && apiKey) {
-      return {
-        spaceId: pathMatch[1],
-        apiKey: apiKey,
-        token: token,
-        baseUrl: url.split('?')[0]
-      };
-    }
-  } catch (e) {
-    console.log('Error parsing Google Chat URL:', e.message);
-  }
-  return null;
-}
-
-async function fetchGoogleChatMessages(chatUrl) {
-  console.log('Fetching Google Chat messages...');
-  
-  const parsed = parseGoogleChatUrl(chatUrl);
-  if (!parsed) {
-    console.log('Invalid Google Chat URL');
-    return null;
-  }
-
-  try {
-    const messages = [];
-    let pageToken = null;
-    let pageCount = 0;
-    const maxPages = 10;
-
-    do {
-      let url = parsed.baseUrl + '?key=' + parsed.apiKey;
-      if (parsed.token) url += '&token=' + parsed.token;
-      if (pageToken) url += '&pageToken=' + pageToken;
-      url += '&pageSize=100';
-
-      console.log('  Fetching page', pageCount + 1);
-      const response = await axios.get(url);
-      
-      if (response.data.messages) {
-        messages.push(...response.data.messages);
-      }
-      
-      pageToken = response.data.nextPageToken;
-      pageCount++;
-      
-      if (pageCount >= maxPages) {
-        console.log('  Reached maximum page limit');
-        break;
-      }
-    } while (pageToken);
-
-    console.log('Fetched', messages.length, 'Google Chat messages');
-
-    const parsedMessages = messages.map(function(msg) {
-      const sender = msg.sender?.displayName || msg.sender?.name || 'Unknown';
-      const text = msg.text || '';
-      const createTime = msg.createTime || null;
-      const thread = msg.thread?.name || null;
-      
-      const ticketIds = [];
-      const ticketRegex = /\b([A-Z]+-\d+)\b/g;
-      let match;
-      while ((match = ticketRegex.exec(text)) !== null) {
-        ticketIds.push(match[1]);
-      }
-
-      return {
-        name: msg.name,
-        sender: sender,
-        text: text,
-        createTime: createTime,
-        thread: thread,
-        ticketIds: ticketIds,
-        source: 'google_chat'
-      };
-    });
-
-    const threads = {};
-    parsedMessages.forEach(function(msg) {
-      const threadId = msg.thread || 'no_thread';
-      if (!threads[threadId]) {
-        threads[threadId] = [];
-      }
-      threads[threadId].push(msg);
-    });
-
-    const participants = [...new Set(parsedMessages.map(function(m) { return m.sender; }))];
-
-    const ticketMentions = {};
-    parsedMessages.forEach(function(msg) {
-      msg.ticketIds.forEach(function(ticketId) {
-        if (!ticketMentions[ticketId]) {
-          ticketMentions[ticketId] = [];
-        }
-        ticketMentions[ticketId].push({
-          sender: msg.sender,
-          text: msg.text,
-          createTime: msg.createTime
-        });
-      });
-    });
-
-    return {
-      spaceId: parsed.spaceId,
-      messages: parsedMessages,
-      threads: threads,
-      participants: participants,
-      ticketMentions: ticketMentions,
-      totalMessages: parsedMessages.length,
-      totalThreads: Object.keys(threads).length
-    };
-  } catch (e) {
-    console.log('Error fetching Google Chat messages:', e.response?.data || e.message);
-    return null;
-  }
-}
-
-function parseGoogleChatExport(chatText) {
-  console.log('Parsing Google Chat export...');
-  
-  // Parse Google Chat export text
-  // Expected format: lines with timestamps, sender names, and messages
-  const lines = chatText.split('\n');
-  const messages = [];
-  
-  let currentMessage = null;
-  
-  lines.forEach(function(line) {
-    line = line.trim();
-    if (!line) return;
-    
-    // Try to match timestamp and sender pattern
-    // More flexible pattern to handle formats like:
-    // "Sender Name, Nov 24, 2:24 PM"
-    // "Sender Name, Nov 24, 2:24 PM, Edited"
-    // "You, Nov 24, 2:24 PM"
-    // "12:34 PM Sender Name: message text"
-    // "Jan 1, 2024, 12:34 PM Sender Name: message text"
-    const timePattern = /^([^,]+),\s+(\w+\s+\d{1,2}(?:,\s+\d{4})?,\s+\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?(?:,\s*Edited)?)\s*$/;
-    const legacyPattern = /^(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?|\w+\s+\d{1,2},\s+\d{4},?\s+\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?)\s+(.+?):\s*(.+)$/;
-    
-    let match = line.match(timePattern);
-    if (match) {
-      // Google Chat format: "Sender Name, Nov 24, 2:24 PM" or "Sender Name, Nov 24, 2:24 PM, Edited"
-      if (currentMessage && currentMessage.text) {
-        messages.push(currentMessage);
-      }
-      
-      const sender = match[1].trim();
-      const timestamp = match[2].replace(/, Edited$/, '').trim();
-      
-      currentMessage = {
-        sender: sender,
-        text: '',
-        timestamp: timestamp,
-        ticketIds: [],
-        source: 'google_chat_export'
-      };
-      return;
-    }
-    
-    match = line.match(legacyPattern);
-    
-    if (match) {
-      // Legacy format: "12:34 PM Sender Name: message text"
-      if (currentMessage) {
-        messages.push(currentMessage);
-      }
-      
-      const timestamp = match[1];
-      const sender = match[2].trim();
-      const text = match[3].trim();
-      
-      // Extract ticket IDs
-      const ticketIds = [];
-      const ticketRegex = /\b([A-Z]+-\d+)\b/g;
-      let ticketMatch;
-      while ((ticketMatch = ticketRegex.exec(text)) !== null) {
-        ticketIds.push(ticketMatch[1]);
-      }
-      
-      currentMessage = {
-        sender: sender,
-        text: text,
-        timestamp: timestamp,
-        ticketIds: ticketIds,
-        source: 'google_chat_export'
-      };
-    } else if (currentMessage) {
-      // Continuation of previous message (actual message content)
-      if (currentMessage.text) {
-        currentMessage.text += '\n' + line;
-      } else {
-        currentMessage.text = line;
-      }
-      
-      // Re-extract ticket IDs
-      const ticketRegex = /\b([A-Z]+-\d+)\b/g;
-      let ticketMatch;
-      while ((ticketMatch = ticketRegex.exec(line)) !== null) {
-        if (!currentMessage.ticketIds.includes(ticketMatch[1])) {
-          currentMessage.ticketIds.push(ticketMatch[1]);
-        }
-      }
-    }
-  });
-  
-  // Save last message
-  if (currentMessage) {
-    messages.push(currentMessage);
-  }
-  
-  console.log('Parsed', messages.length, 'messages from chat export');
-  
-  // Group by threads (approximate based on time proximity)
-  const threads = { 'main_thread': messages };
-  
-  // Extract participants
-  const participants = [...new Set(messages.map(function(m) { return m.sender; }))];
-  
-  // Create ticket mentions map
-  const ticketMentions = {};
-  messages.forEach(function(msg) {
-    msg.ticketIds.forEach(function(ticketId) {
-      if (!ticketMentions[ticketId]) {
-        ticketMentions[ticketId] = [];
-      }
-      ticketMentions[ticketId].push({
-        sender: msg.sender,
-        text: msg.text,
-        timestamp: msg.timestamp
-      });
-    });
-  });
-  
-  return {
-    spaceId: 'exported',
-    messages: messages,
-    threads: threads,
-    participants: participants,
-    ticketMentions: ticketMentions,
-    totalMessages: messages.length,
-    totalThreads: 1
-  };
-}
+const { fetchGoogleChatSpaces } = require('./gchat-utils');
 
 function correlateChatsWithTickets(ticketData, chatData) {
   if (!chatData) return null;
@@ -873,7 +620,7 @@ DATA: ${JSON.stringify(trimmed)}`;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const r = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-opus-4-6',
         max_tokens: 16000,
         messages: [{ role: 'user', content: prompt }]
       });
@@ -955,7 +702,7 @@ DATA: ${JSON.stringify(req.body.context)}
 QUESTION: ${req.body.question}`;
     
     const r = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 4000,
       messages: [{ role: 'user', content: prompt }]
     });
@@ -1674,11 +1421,8 @@ async function sendToGoogleChat(webhookUrl, message) {
 app.post('/api/analyze', async function(req, res) {
   try {
     console.log('\n=== NEW ANALYSIS REQUEST ===');
-    console.log('Has chatExport in request:', !!req.body.chatExport);
-    console.log('Has webhookUrl in request:', !!req.body.webhookUrl);
-    if (req.body.chatExport) {
-      console.log('ChatExport length:', req.body.chatExport.length, 'characters');
-    }
+    console.log('Chat spaces in request:', req.body.chatSpaces || '(none)');
+    console.log('Chat after date:', req.body.chatAfterDate || '(none)');
     
     const parsed = parseYouTrackUrl(req.body.url);
     if (!parsed) return res.status(400).json({ error: 'Invalid YouTrack URL' });
@@ -1686,26 +1430,12 @@ app.post('/api/analyze', async function(req, res) {
     const data = await crawlYouTrack(parsed.baseUrl, parsed.issueId);
     
     // Process Google Chat data - either from export text or URL
-    if (req.body.chatExport && req.body.chatExport.trim()) {
-      // Parse exported chat text
-      const chatData = parseGoogleChatExport(req.body.chatExport);
+    if (req.body.chatSpaces && req.body.chatSpaces.trim()) {
+      const spaceNames = req.body.chatSpaces.split(/[\n,]+/).map(function(s) { return s.trim(); }).filter(Boolean);
+      const chatData = await fetchGoogleChatSpaces(spaceNames, req.body.chatAfterDate || null);
       if (chatData) {
         data.chatMessages = chatData;
         data.correlations = correlateChatsWithTickets(data, chatData);
-        
-        // Update stats
-        data.stats.totalChatMessages = chatData.totalMessages;
-        data.stats.chatParticipants = chatData.participants.length;
-        data.stats.ticketMentionsInChat = Object.keys(chatData.ticketMentions).length;
-      }
-    } else if (req.body.chatUrl) {
-      // Fetch from API URL
-      const chatData = await fetchGoogleChatMessages(req.body.chatUrl);
-      if (chatData) {
-        data.chatMessages = chatData;
-        data.correlations = correlateChatsWithTickets(data, chatData);
-        
-        // Update stats
         data.stats.totalChatMessages = chatData.totalMessages;
         data.stats.chatParticipants = chatData.participants.length;
         data.stats.ticketMentionsInChat = Object.keys(chatData.ticketMentions).length;
@@ -2859,21 +2589,20 @@ async function run() {
   document.getElementById("chatLog").innerHTML = "";
   DATA = null;
   
-  var chatExport = document.getElementById("chatExport").value.trim();
-  var webhookUrl = document.getElementById("webhookUrl").value.trim();
+  var chatSpaces = document.getElementById("chatSpaces").value.trim();
+  var chatAfterDate = document.getElementById("chatAfterDate").value.trim();
   var statusMsg = "Fetching tickets and comments…";
-  if (chatExport) statusMsg += " (with chat export)";
-  if (webhookUrl) statusMsg += " Will post to Google Chat when done.";
+  if (chatSpaces) statusMsg += " (pulling Google Chat messages…)";
   statusEl.textContent = statusMsg;
-  
+
   try {
     var res = await fetch("/api/analyze", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ 
-        url: url, 
-        chatExport: chatExport || undefined,
-        webhookUrl: webhookUrl || undefined
+      body: JSON.stringify({
+        url: url,
+        chatSpaces: chatSpaces || undefined,
+        chatAfterDate: chatAfterDate || undefined
       })
     });
     var d = await res.json();
@@ -2886,12 +2615,8 @@ async function run() {
     BASE = (d.tickets && d.tickets.baseUrl) || "";
     var stats = (d.tickets && d.tickets.stats) || {};
     var statusText = "Done! " + ((d.tickets && d.tickets.children && d.tickets.children.length + 1) || 0) + " tickets, " + (stats.totalComments || 0) + " comments, " + (stats.totalRelated || 0) + " related, " + (stats.totalDependencies || 0) + " dependencies";
-    if (d.chatSent) {
-      statusText += " ✅ Message sent to Google Chat!";
-    } else if (d.chatError) {
-      statusText += " ⚠️ Google Chat error: " + d.chatError;
-    } else if (webhookUrl) {
-      statusText += " (No webhook URL provided)";
+    if (d.tickets && d.tickets.stats && d.tickets.stats.totalChatMessages) {
+      statusText += ", " + d.tickets.stats.totalChatMessages + " chat messages";
     }
     statusEl.textContent = statusText;
     document.getElementById("chatBox").classList.remove("hidden");
@@ -2946,14 +2671,13 @@ app.get('/', function(req, res) {
       <div class="bg-slate-800 rounded-xl p-4 mb-4">
         <input type="text" id="url" placeholder="YouTrack URL: https://youtrack.internetbrands.com/issue/UNSER-1141" class="w-full bg-slate-700 rounded-lg p-3 mb-3 border border-slate-600" value="https://youtrack.internetbrands.com/issue/UNSER-1141">
         <div class="mb-3">
-          <label class="block text-sm font-medium mb-2 text-slate-300">Google Chat Export (optional)</label>
-          <textarea id="chatExport" placeholder="Paste your Google Chat export here..." class="w-full bg-slate-700 rounded-lg p-3 border border-slate-600 h-32 text-sm font-mono" style="resize: vertical;"></textarea>
-          <div class="text-xs text-slate-500 mt-1">Tip: Export your chat conversation and paste it here. The tool will automatically detect ticket IDs and correlate discussions with tickets.</div>
+          <label class="block text-sm font-medium mb-2 text-slate-300">Google Chat spaces (optional — name or ID, one per line)</label>
+          <textarea id="chatSpaces" rows="3" placeholder="MAC Review Aggregation Service (RAS)&#10;avvo-consumer-club&#10;spaces/AAAAerqkeoI" class="w-full bg-slate-700 rounded-lg p-3 border border-slate-600 text-sm font-mono"></textarea>
+          <div class="text-xs text-slate-500 mt-1">Enter space names exactly as they appear in Google Chat, or paste space IDs.</div>
         </div>
         <div class="mb-3">
-          <label class="block text-sm font-medium mb-2 text-slate-300">Google Chat Webhook URL (optional)</label>
-          <input type="text" id="webhookUrl" placeholder="https://chat.googleapis.com/v1/spaces/..." class="w-full bg-slate-700 rounded-lg p-3 border border-slate-600 text-sm font-mono" value="https://chat.googleapis.com/v1/spaces/AAQAvpwMxHw/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=PflqgfVy7hhfJVSXXoXmiXDf6VJpptBn3ZSdeta2B00">
-          <div class="text-xs text-slate-500 mt-1">Enter a Google Chat webhook URL to send a formatted summary message to the channel after analysis completes.</div>
+          <label class="block text-sm font-medium mb-2 text-slate-300">Chat messages after date (optional)</label>
+          <input type="text" id="chatAfterDate" placeholder="e.g. 2026-03-01" class="w-full bg-slate-700 rounded-lg p-3 border border-slate-600 text-sm font-mono">
         </div>
         <button type="button" id="btn" class="w-full py-3 bg-purple-600 hover:bg-purple-500 rounded-lg font-medium">Crawl and Generate Report</button>
         <div id="status" class="mt-3 text-sm text-slate-400"></div>
