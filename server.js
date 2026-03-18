@@ -18,10 +18,11 @@ if (!ADO_PAT || !ANTHROPIC_API_KEY) {
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 const fs = require('fs');
 const path = require('path');
+const { fetchGoogleChatSpaces } = require('./gchat-utils');
 
 // Persistent history storage
 const HISTORY_FILE = path.join(__dirname, 'history.json');
-const MAX_HISTORY = 50;
+const MAX_HISTORY = 20;
 
 function loadHistoryFromFile() {
   try {
@@ -504,7 +505,7 @@ DATA: ${JSON.stringify(optimizedData)}`;
   
   console.log("Analyzing with Claude...");
   var r = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: "claude-opus-4-6",
     max_tokens: 16000,
     temperature: 0,
     messages: [{ role: "user", content: prompt }]
@@ -586,7 +587,7 @@ DATA: ${JSON.stringify(req.body.context)}
 QUESTION: ${req.body.question}`;
     
     var r = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       max_tokens: 4000,
       messages: [{ role: "user", content: prompt }]
     });
@@ -601,11 +602,23 @@ app.post("/api/analyze", async function(req, res) {
     var parsed = parseAdoUrl(req.body.url);
     if (!parsed) return res.status(400).json({ error: "Invalid URL" });
     var data = await crawlAdo(parsed.org, parsed.project, parsed.id);
+
+    if (req.body.chatSpaces && req.body.chatSpaces.trim()) {
+      var spaceNames = req.body.chatSpaces.split(/[\n,]+/).map(function(s) { return s.trim(); }).filter(Boolean);
+      var chatData = await fetchGoogleChatSpaces(spaceNames, req.body.chatAfterDate || null);
+      if (chatData) {
+        data.chatMessages = chatData;
+        if (!data.stats) data.stats = {};
+        data.stats.totalChatMessages = chatData.totalMessages;
+        data.stats.chatParticipants = chatData.participants.length;
+      }
+    }
+
     var analysis = await analyze(data);
-    
+
     // Add to history
     var historyId = addToHistory(parsed.id, req.body.url, data, analysis);
-    
+
     res.json({ tickets: data, analysis: analysis, historyId: historyId });
   } catch (e) {
     console.error("Analysis error:", e);
@@ -1587,11 +1600,15 @@ async function run() {
   document.getElementById("chatLog").innerHTML = "";
   DATA = null;
   
+  var chatSpaces = document.getElementById("chatSpaces").value.trim();
+  var chatAfterDate = document.getElementById("chatAfterDate").value.trim();
+  if (chatSpaces) document.getElementById("status").textContent = "Fetching tickets and chat messages…";
+
   try {
     var res = await fetch("/api/analyze", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ url: url })
+      body: JSON.stringify({ url: url, chatSpaces: chatSpaces || undefined, chatAfterDate: chatAfterDate || undefined })
     });
     var d = await res.json();
     if (d.error) throw new Error(d.error);
@@ -1666,6 +1683,14 @@ app.get("/", function(req, res) {
     
     <div class="bg-slate-800 rounded-xl p-4 mb-4">
       <input type="text" id="url" placeholder="https://dev.azure.com/org/project/_workitems/edit/12345" class="w-full bg-slate-700 rounded-lg p-3 mb-3 border border-slate-600">
+      <div class="mb-3">
+        <label class="block text-sm font-medium mb-2 text-slate-300">Google Chat spaces (optional — name or ID, one per line)</label>
+        <textarea id="chatSpaces" rows="3" placeholder="MAC Review Aggregation Service (RAS)&#10;avvo-consumer-club&#10;spaces/AAAAerqkeoI" class="w-full bg-slate-700 rounded-lg p-3 border border-slate-600 text-sm font-mono"></textarea>
+      </div>
+      <div class="mb-3">
+        <label class="block text-sm font-medium mb-2 text-slate-300">Chat messages after date (optional)</label>
+        <input type="text" id="chatAfterDate" placeholder="e.g. 2026-03-01" class="w-full bg-slate-700 rounded-lg p-3 border border-slate-600 text-sm font-mono">
+      </div>
       <button onclick="run()" id="btn" class="w-full py-3 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium">Crawl and Generate Report</button>
       <div id="status" class="mt-3 text-sm text-slate-400"></div>
     </div>

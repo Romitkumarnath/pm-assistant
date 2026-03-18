@@ -11,21 +11,8 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const Anthropic = require('@anthropic-ai/sdk');
-const {
-  Document,
-  Packer,
-  Paragraph,
-  TextRun,
-  Table,
-  TableRow,
-  TableCell,
-  WidthType,
-  BorderStyle,
-  PageBreak,
-  AlignmentType,
-  ShadingType,
-  convertInchesToTwip
-} = require('docx');
+const { fetchGoogleChatSpaces } = require('./gchat-utils');
+// docx import removed — report is now generated as HTML email + Gmail draft
 const path = require('path');
 
 const app = express();
@@ -189,54 +176,90 @@ function optimizeForAI(youtrackResults, adoResults) {
 
 const REPORT_PROMPT = `You are a Senior TPM generating a bi-weekly status update for the Q1 Bundle Premium Profiles & Network Footprint workstream.
 
-You will receive aggregated ticket data from YouTrack and Azure DevOps (ADO): parent epics and their child tickets, plus comments and descriptions. Optionally you may receive "Additional context from the user" (team updates, meeting notes, exclusions); use it to inform the report when provided. Use all of this to fill the report structure below. Extract:
-- Major milestones, completions, and production releases from ticket statuses and comments
-- Key technical decisions from comments and descriptions
-- Critical path items, blockers, risks from comments and status
-- Milestones (next 2-4 weeks), scope/schedule changes, project status items, up next, decisions pending
-- Appendix: project completion summary table; key technical decisions this period; team updates
+You will receive aggregated ticket data from YouTrack (tag as [MAC]) and Azure DevOps (tag as [FindLaw]): parent epics and their child tickets, plus comments and descriptions. Optionally you may receive "Additional context from the user" (team updates, meeting notes, Airtable project status, Google Chat messages); use it heavily to infer real project names, percentages, and statuses. Use all of this to produce the report.
 
 PROPERTY / BU LABELING (REQUIRED):
-When an update, milestone, or item applies to one of these property groups, explicitly indicate it in the output:
-- **FindLaw properties**: LD (Legal Directories), FindLaw, Abogado, Law Info — label as "[FindLaw]" or name the specific property (e.g. "[FindLaw - LD]", "[Law Info]").
-- **MAC properties**: Avvo.com, Lawyers.com, Martindale.com — label as "[MAC]" or name the specific property (e.g. "[MAC - Avvo]", "[Lawyers.com]").
-Use this in bullets, project status lines, key milestones, and appendix where the context is FindLaw vs MAC. If it applies to both or the whole bundle, you may say so instead of labeling a single property.
+- FindLaw properties (LD, FindLaw, Abogado, Law Info) → label as "(FL)" inline or "[FindLaw]" in narratives
+- MAC properties (Avvo.com, Lawyers.com, Martindale.com) → label as "(MAC)" inline or "[MAC]" in narratives
+- If both → "(FL/MAC)" or "[FindLaw/MAC]"
 
 BI-WEEKLY RECENCY (REQUIRED):
-- You will receive reportDate and cutoffDate (14 days before report date). Use older comments/updates only for context when interpreting recent work.
-- In the report OUTPUT (all JSON fields you return), include ONLY updates, decisions, milestones, and items that are from the last two weeks (on or after cutoffDate). Do not write into the report narrative or bullets any detail that is older than two weeks.
-- Summarize the current state and recent (≤2 week) activity; omit historical detail from the written output.
+- Include ONLY updates, decisions, milestones from the last two weeks (on or after cutoffDate) in your output.
+- Use older data only as background context when interpreting recent activity.
 
-OUTPUT FORMAT: Return a single JSON object (no markdown, no code fence) with the following keys. Use the exact keys so the document generator can parse them.
+OUTPUT FORMAT: Return a single JSON object (no markdown, no code fence) with the following keys exactly:
 
 {
-  "majorMilestones": ["bullet 1", "bullet 2", ...],
-  "oneSentenceSummary": "Teams are executing on remaining scope with all projects tracking [COLOR] for completion by [TARGET DATE].",
-  "keyTechnicalDecisionsFinalized": ["(1) Decision name—brief description", ...],
-  "criticalPathItems": ["item 1", "item 2", ...],
-  "overallHealthStatus": "GREEN" or "YELLOW" or "RED",
-  "overallHealthAssessment": "1-2 sentence summary of overall program health",
-  "keyMilestones": [{"milestone": "", "targetDate": "", "owner": "", "status": "On Track|At Risk|Blocked"}, ...],
-  "scopeText": "No new scope changes this period." or bullet list string,
-  "schedulesText": "No schedule changes this period." or bullet list string,
-  "projectStatusItems": [{"projectName": "", "keyStatusLine": "", "secondStatusLine": "", "updateDate": "", "bullets": ["", ...], "decisionMade": ["", ...] or null, "decisionNeeded": "" or null, "pathToGreen": ""}, ...],
-  "upNextWeek1Label": "Week of Feb 2–6",
-  "upNextWeek1Items": ["", ...],
-  "upNextWeek2Label": "Week of Feb 9–13",
-  "upNextWeek2Items": ["", ...],
+  "executiveSummary": "2-3 sentence executive summary paragraph. Describe overall portfolio momentum, notable completions, health status inline (e.g. 'tracking predominantly GREEN'), and any items requiring attention.",
+  "overallHealthStatus": "GREEN" | "YELLOW" | "RED",
+  "majorMilestones": [
+    {"text": "Cross-Network Awards MAC — Completed 3/3", "statusColor": "green"},
+    {"text": "Dynamic AI Intake Form on FL & LI Profiles — 95% Delayed, end 3/29", "statusColor": "yellow"}
+  ],
+  "keyTechnicalDecisions": [
+    {"title": "Review Categorization Experience:", "description": "Dynamic review categorization display only renders when matching Areas of Practice (AoP) are available, reducing irrelevant noise."},
+    ...
+  ],
+  "workstreams": [
+    {
+      "name": "Dynamic Profiles",
+      "projects": [
+        {"name": "AI Summarization & Categorization by PA (FL)", "pct": "98%", "statusLabel": "On Track", "statusColor": "green", "endDate": "3/29"},
+        {"name": "Dynamic AI Intake Form on FL & LI Profiles (FL)", "pct": "95%", "statusLabel": "Delayed", "statusColor": "yellow", "endDate": "3/29"}
+      ]
+    },
+    {
+      "name": "Chat & AI Intake",
+      "projects": [...]
+    },
+    {
+      "name": "Data & Analytics",
+      "projects": [...]
+    },
+    {
+      "name": "Sales Enablement & Fulfillment",
+      "projects": [...]
+    }
+  ],
+  "criticalPathItems": [
+    {"title": "Dynamic AI Intake Form on FL & LI Profiles", "description": "Status: 95% complete but delayed. Expected completion 3/29. Blocking profile experience completeness across network."},
+    ...
+  ],
+  "adoMetrics": {
+    "openItems": "242 (Lawyer Directory: 117, Front End: 56, PALS: 69)",
+    "accomplished": "155",
+    "openFocus": "Profile/reviews platform changes (80); QA/testing validation (47); SRP/attorney-listings behavior (30)",
+    "keyOpenItems": ["Attorney Listings SRP QA/code review", "Profile Bundling bugs", "Review categorization bugs (#247658, #247372)"]
+  },
+  "upNextWeek1Label": "Week of Mar 17–21",
+  "upNextWeek1Items": ["...", ...],
+  "upNextWeek2Label": "Week of Mar 24–28",
+  "upNextWeek2Items": ["...", ...],
+  "decisionsMade": [
+    {
+      "decision": "Sort-by-most-recent logic for review categorization approved for rollout",
+      "source": "[FindLaw]",
+      "owner": "Engineering",
+      "date": "3/9",
+      "context": "Passed UAT; positioned for production release post-MVP."
+    },
+    ...
+  ],
   "decisionsPending": [{"decision": "", "owner": "", "targetDate": ""}, ...],
   "appendixRows": [{"project": "", "macPct": "", "findLawPct": "", "status": ""}, ...],
-  "keyTechnicalDecisionsTable": [{"decision": "", "details": "", "impact": ""}, ...],
   "teamUpdatesNote": "PM Note: ..."
 }
 
 RULES:
-- Use only information inferred from the provided ticket data (statuses, comments, descriptions). Do not invent ticket numbers.
-- Keep tone professional, concise, action-oriented. No jargon without context.
-- Status values for appendix: "Green", "Green - Unblocked", "Green - Manual MVP", "Yellow", "Red", "In Progress", "Starting ([Owner])".
-- For percentages use "N/A" where not applicable.
-- Limit keyMilestones to 4-6; criticalPathItems to 2-3; projectStatusItems to items requiring attention.
-- Dates: use the report date provided for "current" context. Only include in your output content from on or after cutoffDate (last two weeks).
+- Use real project names and data from ticket descriptions, comments, and additional context. Do not invent ticket numbers.
+- Keep tone professional, concise, action-oriented.
+- Infer workstream groupings from project names: Dynamic Profiles; Chat & AI Intake; Data & Analytics; Sales Enablement & Fulfillment; Retargeting; E2E Testing. Only include workstreams that have projects.
+- statusColor values: "green" = On Track/Completed, "yellow" = Delayed/At Risk, "red" = Blocked.
+- adoMetrics: derive open item counts from ADO child ticket states and area paths when possible. Set to null if insufficient data.
+- Limit criticalPathItems to the 2-4 most important items requiring attention.
+- appendixRows status values: "Green", "Green - Unblocked", "Green - Manual MVP", "Yellow", "Red", "In Progress", "Starting ([Owner])".
+- Dates: use the report date provided. Only include content from on or after cutoffDate.
+- decisionsMade: scan ALL sources — ADO ticket comments and state transitions, YouTrack comments and state transitions, and Google Chat messages — for any explicit decisions, approvals, resolutions, scope confirmations, or "go/no-go" calls made on or after cutoffDate. Include the source tag ([FindLaw], [MAC], or [Chat]), the person who made or confirmed the decision (owner), approximate date, and a one-line context note. If nothing was decided this period, return an empty array.
 `;
 
 function extractJsonFromResponse(text) {
@@ -255,223 +278,216 @@ function extractJsonFromResponse(text) {
   }
 }
 
-// --- Docx building (template formatting) ---
+// --- Email HTML building ---
 
-const DARK_TEAL = '1F4E5F';
-const LIGHT_GRAY = 'CCCCCC';
-
-function docTitle(reportDate) {
-  return new Paragraph({
-    children: [
-      new TextRun({ text: 'Q1 Bundle Premium Profiles & Network Footprint', bold: true, size: 32, color: DARK_TEAL, font: 'Arial' })
-    ],
-    spacing: { after: 120 }
-  });
+function statusDot(color) {
+  const colors = { green: '#4caf50', yellow: '#ff9800', red: '#f44336' };
+  const hex = colors[color] || '#9e9e9e';
+  return '<span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:' + hex + ';margin-right:7px;vertical-align:middle;"></span>';
 }
 
-function docSubtitle(reportDate) {
-  return new Paragraph({
-    children: [
-      new TextRun({ text: 'Bi-Weekly Status Update | ' + reportDate, size: 22, font: 'Arial' })
-    ],
-    spacing: { after: 360 }
-  });
-}
+function buildEmailHtml(r, reportDate, dateRange) {
+  const health = (r.overallHealthStatus || 'GREEN').toUpperCase();
+  const healthColor = health === 'GREEN' ? '#4caf50' : health === 'YELLOW' ? '#ff9800' : '#f44336';
 
-function sectionHeading(num, text) {
-  return new Paragraph({
-    children: [
-      new TextRun({ text: '(' + num + ') ' + text, bold: true, size: 26, color: DARK_TEAL, font: 'Arial' })
-    ],
-    spacing: { before: 240, after: 180 }
-  });
-}
+  let html = '<!DOCTYPE html><html><head><meta charset="UTF-8">' +
+    '<style>body{font-family:Arial,sans-serif;font-size:14px;line-height:1.6;color:#333;background:#f9f9f9;padding:20px;}' +
+    '.c{max-width:800px;background:#fff;padding:30px;border-radius:5px;box-shadow:0 1px 3px rgba(0,0,0,.1);}' +
+    'h1{margin-top:0;font-size:18px;border-bottom:2px solid #333;padding-bottom:10px;}' +
+    'h2{font-size:16px;margin-top:24px;color:#222;}h3{font-size:14px;margin-top:16px;color:#444;}' +
+    'ul{margin:8px 0;padding-left:20px;}li{margin:5px 0;}' +
+    '.metric{background:#f0f0f0;padding:10px;border-left:4px solid #2196f3;margin:12px 0;}' +
+    '.footer{margin-top:30px;padding-top:20px;border-top:1px solid #ddd;font-size:13px;color:#666;}' +
+    '</style></head><body><div class="c">';
 
-function bodyParagraph(htmlOrText) {
-  const text = (htmlOrText || '').replace(/<[^>]+>/g, ' ').trim();
-  return new Paragraph({
-    children: [new TextRun({ text: text || ' ', size: 20, font: 'Arial' })],
-    spacing: { after: 120 },
-    indent: { left: 720 }
-  });
-}
+  html += '<div style="font-weight:bold;margin-bottom:18px;font-size:13px;color:#666;">Subject: Q1 Bundle Premium Profiles &amp; Network Footprint — Bi-Weekly Executive Update (' + (dateRange || reportDate) + ')</div>';
+  html += '<h1>Q1 Bundle: Bi-Weekly Executive Update</h1>';
 
-function bulletParagraph(text) {
-  return new Paragraph({
-    children: [new TextRun({ text: '• ' + (text || ' '), size: 20, font: 'Arial' })],
-    spacing: { after: 80 },
-    indent: { left: 720 }
-  });
-}
+  // Executive Summary
+  html += '<h2>Executive Summary</h2>';
+  html += '<p>' + (r.executiveSummary || '') + '</p>';
+  html += '<p>Overall Health: <strong style="color:' + healthColor + ';">' + health + '</strong></p>';
 
-function tableHeaderRow(cells) {
-  return new TableRow({
-    children: cells.map(function (cellText) {
-      return new TableCell({
-        children: [
-          new Paragraph({
-            children: [new TextRun({ text: cellText, bold: true, size: 20, color: 'FFFFFF', font: 'Arial' })]
-          })
-        ],
-        shading: { fill: DARK_TEAL, type: ShadingType.CLEAR },
-        margins: { top: 480, bottom: 480, left: 720, right: 720 }
+  // Major Milestones
+  if (r.majorMilestones && r.majorMilestones.length) {
+    html += '<h2>Major Milestones Achieved (Last Two Weeks)</h2><ul>';
+    r.majorMilestones.forEach(function (m) {
+      const text = typeof m === 'string' ? m : (m.text || '');
+      const color = typeof m === 'object' ? (m.statusColor || 'green') : 'green';
+      html += '<li>' + statusDot(color) + '<strong>' + escHtml(text) + '</strong></li>';
+    });
+    html += '</ul>';
+  }
+
+  // Key Technical Decisions
+  if (r.keyTechnicalDecisions && r.keyTechnicalDecisions.length) {
+    html += '<h2>Key Technical Decisions</h2><ul>';
+    r.keyTechnicalDecisions.forEach(function (d) {
+      if (typeof d === 'string') {
+        html += '<li>' + escHtml(d) + '</li>';
+      } else {
+        html += '<li><strong>' + escHtml(d.title || '') + '</strong> ' + escHtml(d.description || '') + '</li>';
+      }
+    });
+    html += '</ul>';
+  }
+
+  // In-Flight Projects by Workstream
+  if (r.workstreams && r.workstreams.length) {
+    html += '<h2>In-Flight Projects — Status by Workstream</h2>';
+    r.workstreams.forEach(function (ws) {
+      html += '<h3>' + escHtml(ws.name || '') + '</h3><ul>';
+      (ws.projects || []).forEach(function (p) {
+        const color = p.statusColor || 'green';
+        const label = p.statusLabel || 'On Track';
+        const pct = p.pct ? p.pct + ' ' : '';
+        const endDate = p.endDate ? ', end ' + p.endDate : '';
+        const isBold = color !== 'green';
+        const line = (p.name || '') + ' — ' + pct + label + endDate;
+        html += '<li>' + statusDot(color) + (isBold ? '<strong>' + escHtml(line) + '</strong>' : escHtml(line)) + '</li>';
       });
-    })
-  });
+      html += '</ul>';
+    });
+  }
+
+  // Critical Path Items
+  if (r.criticalPathItems && r.criticalPathItems.length) {
+    html += '<h2>Critical Path Items Requiring Attention</h2>';
+    r.criticalPathItems.forEach(function (c) {
+      if (typeof c === 'string') {
+        html += '<div class="metric">' + escHtml(c) + '</div>';
+      } else {
+        html += '<div class="metric"><strong>' + escHtml(c.title || '') + '</strong><br>' + escHtml(c.description || '') + '</div>';
+      }
+    });
+  }
+
+  // Decisions Made
+  if (r.decisionsMade && r.decisionsMade.length) {
+    html += '<h2>Decisions Made (Last Two Weeks)</h2>';
+    html += '<table style="border-collapse:collapse;width:100%;font-size:13px;">';
+    html += '<tr style="background:#f0f0f0;"><th style="border:1px solid #ccc;padding:6px 10px;text-align:left;">Decision</th><th style="border:1px solid #ccc;padding:6px 10px;text-align:left;">Source</th><th style="border:1px solid #ccc;padding:6px 10px;text-align:left;">Owner</th><th style="border:1px solid #ccc;padding:6px 10px;text-align:left;">Date</th><th style="border:1px solid #ccc;padding:6px 10px;text-align:left;">Context</th></tr>';
+    r.decisionsMade.forEach(function (d) {
+      html += '<tr>';
+      html += '<td style="border:1px solid #ccc;padding:6px 10px;"><strong>' + escHtml(d.decision || '') + '</strong></td>';
+      html += '<td style="border:1px solid #ccc;padding:6px 10px;">' + escHtml(d.source || '') + '</td>';
+      html += '<td style="border:1px solid #ccc;padding:6px 10px;">' + escHtml(d.owner || '') + '</td>';
+      html += '<td style="border:1px solid #ccc;padding:6px 10px;white-space:nowrap;">' + escHtml(d.date || '') + '</td>';
+      html += '<td style="border:1px solid #ccc;padding:6px 10px;">' + escHtml(d.context || '') + '</td>';
+      html += '</tr>';
+    });
+    html += '</table>';
+  }
+
+  // ADO Metrics
+  if (r.adoMetrics) {
+    const m = r.adoMetrics;
+    html += '<h2>ADO Metrics</h2><ul>';
+    if (m.openItems) html += '<li>Open work items: ' + escHtml(m.openItems) + '</li>';
+    if (m.accomplished) html += '<li>Accomplished in last two weeks: ' + escHtml(m.accomplished) + '</li>';
+    if (m.openFocus) html += '<li>Open work focus: ' + escHtml(m.openFocus) + '</li>';
+    if (m.keyOpenItems && m.keyOpenItems.length) html += '<li>Key open items: ' + m.keyOpenItems.map(escHtml).join(', ') + '</li>';
+    html += '</ul>';
+  }
+
+  // Up Next
+  if ((r.upNextWeek1Items && r.upNextWeek1Items.length) || (r.upNextWeek2Items && r.upNextWeek2Items.length)) {
+    html += '<h2>Up Next — Focus Areas for Next Two Weeks</h2>';
+    if (r.upNextWeek1Label || (r.upNextWeek1Items && r.upNextWeek1Items.length)) {
+      html += '<h3>' + escHtml(r.upNextWeek1Label || 'Week 1') + '</h3><ul>';
+      (r.upNextWeek1Items || []).forEach(function (x) { html += '<li>' + escHtml(x) + '</li>'; });
+      html += '</ul>';
+    }
+    if (r.upNextWeek2Label || (r.upNextWeek2Items && r.upNextWeek2Items.length)) {
+      html += '<h3>' + escHtml(r.upNextWeek2Label || 'Week 2') + '</h3><ul>';
+      (r.upNextWeek2Items || []).forEach(function (x) { html += '<li>' + escHtml(x) + '</li>'; });
+      html += '</ul>';
+    }
+  }
+
+  // Decisions Pending
+  if (r.decisionsPending && r.decisionsPending.length) {
+    html += '<h2>Decisions Pending</h2><ul>';
+    r.decisionsPending.forEach(function (d) {
+      html += '<li><strong>' + escHtml(d.decision || '') + '</strong> — Owner: ' + escHtml(d.owner || 'TBD') + ', by ' + escHtml(d.targetDate || 'TBD') + '</li>';
+    });
+    html += '</ul>';
+  }
+
+  // Team Notes
+  if (r.teamUpdatesNote) {
+    html += '<h2>Team Updates</h2><p>' + escHtml(r.teamUpdatesNote) + '</p>';
+  }
+
+  html += '<div class="footer"><p><strong>Contact:</strong> Romit Nath (romit.nath@internetbrands.com)<br><strong>Generated:</strong> ' + reportDate + '</p></div>';
+  html += '</div></body></html>';
+  return html;
 }
 
-function tableDataRow(cells, options) {
-  return new TableRow({
-    children: cells.map(function (cellText, i) {
-      const bold = options && options.boldCells && options.boldCells.indexOf(i) !== -1;
-      return new TableCell({
-        children: [
-          new Paragraph({
-            alignment: options && options.centeredCells && options.centeredCells.indexOf(i) !== -1 ? AlignmentType.CENTER : undefined,
-            children: [new TextRun({ text: String(cellText || ''), bold: !!bold, size: 20, font: 'Arial' })]
-          })
-        ],
-        margins: { top: 480, bottom: 480, left: 720, right: 720 }
-      });
-    })
-  });
+function escHtml(str) {
+  return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function buildDocx(reportJson, reportDate) {
-  const r = reportJson || {};
-  const children = [];
+// --- Gmail draft creation ---
 
-  children.push(docTitle(reportDate));
-  children.push(docSubtitle(reportDate));
+async function createGmailDraft(subject, htmlBody) {
+  const fs = require('fs');
+  let tokenData, credData;
+  try {
+    tokenData = JSON.parse(fs.readFileSync(path.join(__dirname, 'token.json'), 'utf8'));
+    credData = JSON.parse(fs.readFileSync(path.join(__dirname, 'oauth_credentials.json'), 'utf8'));
+  } catch (e) {
+    return { error: 'Could not read token.json or oauth_credentials.json: ' + e.message };
+  }
 
-  children.push(new Paragraph({
-    children: [new TextRun({ text: 'Executive Summary', bold: true, size: 26, color: DARK_TEAL, font: 'Arial' })]
-  }));
-  children.push(new Paragraph({ children: [new TextRun({ text: 'Major milestones achieved this period:', bold: true, size: 20, font: 'Arial' })] }));
-  (r.majorMilestones || []).forEach(function (m) {
-    children.push(bulletParagraph(m));
-  });
-  children.push(new Paragraph({ children: [new TextRun({ text: r.oneSentenceSummary || '', size: 20, font: 'Arial' })] }));
-  children.push(new Paragraph({ children: [new TextRun({ text: 'Key technical decisions finalized this period:', bold: true, size: 20, font: 'Arial' })] }));
-  (r.keyTechnicalDecisionsFinalized || []).forEach(function (d) {
-    children.push(bulletParagraph(d));
-  });
-  children.push(new Paragraph({ children: [new TextRun({ text: 'Critical path items requiring attention:', bold: true, size: 20, font: 'Arial' })] }));
-  (r.criticalPathItems || []).forEach(function (c) {
-    children.push(bulletParagraph(c));
-  });
+  const creds = credData.installed || credData.web || credData;
+  const clientId = creds.client_id;
+  const clientSecret = creds.client_secret;
+  const refreshToken = tokenData.refresh_token;
 
-  children.push(sectionHeading(1, 'Overall Health'));
-  children.push(new Table({
-    width: { size: 100, type: WidthType.PERCENTAGE },
-    borders: { top: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY }, bottom: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY }, left: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY }, right: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY } },
-    rows: [
-      tableHeaderRow(['Status', 'Assessment']),
-      tableDataRow([r.overallHealthStatus || 'N/A', r.overallHealthAssessment || ''], { boldCells: [0], centeredCells: [0] })
-    ]
-  }));
+  if (!clientId || !clientSecret || !refreshToken) {
+    return { error: 'Missing OAuth credentials in token.json or oauth_credentials.json' };
+  }
 
-  children.push(sectionHeading(2, 'Key Milestones (Upcoming)'));
-  const milestoneRows = [tableHeaderRow(['Milestone', 'Target Date', 'Owner', 'Status'])];
-  (r.keyMilestones || []).forEach(function (m) {
-    milestoneRows.push(tableDataRow([m.milestone || '', m.targetDate || '', m.owner || '', m.status || ''], { centeredCells: [3] }));
-  });
-  children.push(new Table({
-    width: { size: 100, type: WidthType.PERCENTAGE },
-    borders: { top: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY }, bottom: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY }, left: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY }, right: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY } },
-    rows: milestoneRows
-  }));
+  // Refresh access token
+  let accessToken;
+  try {
+    const tokenRes = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token'
+    }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    accessToken = tokenRes.data.access_token;
+  } catch (e) {
+    return { error: 'OAuth token refresh failed: ' + (e.response?.data?.error_description || e.message) };
+  }
 
-  children.push(sectionHeading(3, 'Scope'));
-  children.push(bodyParagraph(r.scopeText || 'No new scope changes this period.'));
+  // Build raw RFC2822 message
+  const to = 'romit.nath@internetbrands.com';
+  const boundary = 'boundary_' + Date.now();
+  const rawMsg = [
+    'To: ' + to,
+    'Subject: ' + subject,
+    'MIME-Version: 1.0',
+    'Content-Type: text/html; charset=UTF-8',
+    '',
+    htmlBody
+  ].join('\r\n');
 
-  children.push(sectionHeading(4, 'Schedules'));
-  children.push(bodyParagraph(r.schedulesText || 'No schedule changes this period.'));
+  const encodedMsg = Buffer.from(rawMsg).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
-  children.push(new Paragraph({ children: [new PageBreak()] }));
-  children.push(sectionHeading(5, 'Project Status - Items Requiring Attention'));
-  (r.projectStatusItems || []).forEach(function (p) {
-    children.push(new Paragraph({ children: [new TextRun({ text: p.projectName || '', bold: true, size: 20, font: 'Arial' })] }));
-    children.push(bodyParagraph(p.keyStatusLine || ''));
-    if (p.secondStatusLine) children.push(bodyParagraph(p.secondStatusLine));
-    children.push(new Paragraph({ children: [new TextRun({ text: 'Update (' + (p.updateDate || '') + '):', bold: true, size: 20, font: 'Arial' })] }));
-    (p.bullets || []).forEach(function (b) { children.push(bulletParagraph(b)); });
-    if (p.decisionMade && p.decisionMade.length) {
-      children.push(new Paragraph({ children: [new TextRun({ text: 'Decision Made:', bold: true, size: 20, font: 'Arial' })] }));
-      p.decisionMade.forEach(function (d) { children.push(bulletParagraph(d)); });
-    }
-    if (p.decisionNeeded) {
-      children.push(new Paragraph({ children: [new TextRun({ text: 'Decision Needed: ' + p.decisionNeeded, size: 20, font: 'Arial' })] }));
-    }
-    if (p.pathToGreen) {
-      children.push(new Paragraph({ children: [new TextRun({ text: 'Path to Green: ' + p.pathToGreen, size: 20, font: 'Arial' })] }));
-    }
-    children.push(new Paragraph({ spacing: { after: 180 } }));
-  });
-
-  children.push(new Paragraph({ children: [new PageBreak()] }));
-  children.push(sectionHeading(6, 'Up Next - Focus Areas for Next Two Weeks'));
-  children.push(new Paragraph({ children: [new TextRun({ text: r.upNextWeek1Label || 'Week of [Date Range 1]', bold: true, size: 20, font: 'Arial' })] }));
-  (r.upNextWeek1Items || []).forEach(function (x) { children.push(bulletParagraph(x)); });
-  children.push(new Paragraph({ children: [new TextRun({ text: r.upNextWeek2Label || 'Week of [Date Range 2]', bold: true, size: 20, font: 'Arial' })] }));
-  (r.upNextWeek2Items || []).forEach(function (x) { children.push(bulletParagraph(x)); });
-
-  children.push(new Paragraph({ children: [new TextRun({ text: 'Decisions Pending', bold: true, size: 26, color: DARK_TEAL, font: 'Arial' })] }));
-  const pendingRows = [tableHeaderRow(['Decision', 'Owner', 'Target Date'])];
-  (r.decisionsPending || []).forEach(function (d) {
-    pendingRows.push(tableDataRow([d.decision || '', d.owner || '', d.targetDate || '']));
-  });
-  children.push(new Table({
-    width: { size: 100, type: WidthType.PERCENTAGE },
-    borders: { top: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY }, bottom: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY }, left: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY }, right: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY } },
-    rows: pendingRows
-  }));
-
-  children.push(new Paragraph({ children: [new TextRun({ text: 'Appendix: Project Completion Summary', bold: true, size: 26, color: DARK_TEAL, font: 'Arial' })] }));
-  const appendixRows = [tableHeaderRow(['Project', 'MAC %', 'FindLaw %', 'Status'])];
-  (r.appendixRows || []).forEach(function (row) {
-    appendixRows.push(tableDataRow([row.project || '', row.macPct || '', row.findLawPct || '', row.status || ''], { boldCells: [3], centeredCells: [3] }));
-  });
-  children.push(new Table({
-    width: { size: 100, type: WidthType.PERCENTAGE },
-    borders: { top: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY }, bottom: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY }, left: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY }, right: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY } },
-    rows: appendixRows
-  }));
-
-  children.push(new Paragraph({ children: [new TextRun({ text: 'Key Technical Decisions This Period', bold: true, size: 26, color: DARK_TEAL, font: 'Arial' })] }));
-  const techRows = [tableHeaderRow(['Decision', 'Details', 'Impact'])];
-  (r.keyTechnicalDecisionsTable || []).forEach(function (row) {
-    techRows.push(tableDataRow([row.decision || '', row.details || '', row.impact || '']));
-  });
-  children.push(new Table({
-    width: { size: 100, type: WidthType.PERCENTAGE },
-    borders: { top: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY }, bottom: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY }, left: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY }, right: { style: BorderStyle.SINGLE, size: 4, color: LIGHT_GRAY } },
-    rows: techRows
-  }));
-
-  children.push(new Paragraph({ children: [new TextRun({ text: 'Team Updates Summary', bold: true, size: 26, color: DARK_TEAL, font: 'Arial' })] }));
-  children.push(new Paragraph({ children: [new TextRun({ text: 'PM Note:', bold: true, size: 20, font: 'Arial' })] }));
-  children.push(bodyParagraph(r.teamUpdatesNote || ''));
-  children.push(new Paragraph({ children: [new TextRun({ text: 'Thanks,\nRomit', size: 20, font: 'Arial' })] }));
-
-  const doc = new Document({
-    styles: { default: { document: { run: { font: 'Arial', size: 20 } } } },
-    sections: [{
-      properties: {
-        page: {
-          margin: {
-            top: convertInchesToTwip(0.75),
-            right: convertInchesToTwip(0.75),
-            bottom: convertInchesToTwip(0.75),
-            left: convertInchesToTwip(0.75)
-          }
-        }
-      },
-      children: children
-    }]
-  });
-
-  return Packer.toBuffer(doc);
+  try {
+    const draftRes = await axios.post(
+      'https://gmail.googleapis.com/gmail/v1/users/me/drafts',
+      { message: { raw: encodedMsg } },
+      { headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' } }
+    );
+    const draftId = draftRes.data.id;
+    return { draftId, draftUrl: 'https://mail.google.com/mail/u/0/#drafts' };
+  } catch (e) {
+    return { error: 'Gmail draft creation failed: ' + (e.response?.data?.error?.message || e.message) };
+  }
 }
 
 // --- API ---
@@ -530,7 +546,16 @@ app.post('/api/generate-report', async function (req, res) {
   cutoffDateObj.setDate(cutoffDateObj.getDate() - 14);
   const cutoffDate = formatShortDate(cutoffDateObj);
 
-  const additionalContextRaw = (req.body.additionalContext || '').trim();
+  let additionalContextRaw = (req.body.additionalContext || '').trim();
+
+  if (req.body.chatSpaces && req.body.chatSpaces.trim()) {
+    const spaceNames = req.body.chatSpaces.split(/[\n,]+/).map(function(s) { return s.trim(); }).filter(Boolean);
+    const chatTranscript = await fetchGoogleChatSpaces(spaceNames, req.body.chatAfterDate || null);
+    if (chatTranscript) {
+      additionalContextRaw = (additionalContextRaw + '\n\nGoogle Chat messages:\n' + chatTranscript).trim();
+    }
+  }
+
   const additionalContext = additionalContextRaw.length > MAX_ADDITIONAL_CONTEXT_CHARS
     ? additionalContextRaw.substring(0, MAX_ADDITIONAL_CONTEXT_CHARS) + '\n[... truncated for length]'
     : additionalContextRaw;
@@ -575,7 +600,7 @@ app.post('/api/generate-report', async function (req, res) {
 
   try {
     const msg = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-opus-4-6',
       max_tokens: 16000,
       temperature: 0,
       messages: [{ role: 'user', content: prompt }]
@@ -585,11 +610,29 @@ app.post('/api/generate-report', async function (req, res) {
     if (!reportJson) {
       return res.status(500).json({ error: 'AI did not return valid JSON', raw: text.substring(0, 2000) });
     }
-    const buffer = await buildDocx(reportJson, reportDate);
-    const filename = 'Q1-Bundle-BiWeekly-Status-' + reportDate.replace(/\//g, '-') + '.docx';
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-    res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"');
-    res.send(Buffer.from(buffer));
+
+    const reportDateObj2 = new Date(reportDate);
+    const cutoffDateObj2 = new Date(reportDateObj2);
+    cutoffDateObj2.setDate(cutoffDateObj2.getDate() - 14);
+    const dateRange = [
+      (cutoffDateObj2.getMonth() + 1) + '/' + cutoffDateObj2.getDate(),
+      '–',
+      (reportDateObj2.getMonth() + 1) + '/' + reportDateObj2.getDate() + ', ' + reportDateObj2.getFullYear()
+    ].join(' ');
+
+    const htmlBody = buildEmailHtml(reportJson, reportDate, dateRange);
+    const subject = 'Q1 Bundle Premium Profiles & Network Footprint — Bi-Weekly Executive Update (' + dateRange + ')';
+
+    const draftResult = await createGmailDraft(subject, htmlBody);
+
+    res.json({
+      success: true,
+      subject,
+      draftId: draftResult.draftId || null,
+      draftUrl: draftResult.draftUrl || null,
+      draftError: draftResult.error || null,
+      htmlPreview: htmlBody
+    });
   } catch (e) {
     console.error('Generate report error:', e);
     res.status(500).json({ error: e.message });
@@ -618,11 +661,14 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <textarea id="youtrackIds" rows="4" placeholder="UNSER-1141&#10;CSMR-15266&#10;https://youtrack.internetbrands.com/issue/UNSER-1141" class="w-full bg-slate-700 rounded-lg p-3 border border-slate-600 font-mono text-sm mb-4"></textarea>
       <label class="block text-sm font-medium text-slate-300 mb-2">ADO ticket URLs (one per line)</label>
       <textarea id="adoUrls" rows="4" placeholder="https://dev.azure.com/org/project/_workitems/edit/12345" class="w-full bg-slate-700 rounded-lg p-3 border border-slate-600 font-mono text-sm mb-4"></textarea>
+      <label class="block text-sm font-medium text-slate-300 mb-2">Google Chat spaces (optional — name or ID, one per line)</label>
+      <textarea id="chatSpaces" rows="3" placeholder="Q1 Bundles - PMO&#10;MAC Review Aggregation Service (RAS)&#10;spaces/AAQARjk9mWY" class="w-full bg-slate-700 rounded-lg p-3 border border-slate-600 font-mono text-sm mb-2"></textarea>
+      <input type="text" id="chatAfterDate" placeholder="Chat messages after date (e.g. 2026-03-01)" class="w-full bg-slate-700 rounded-lg p-3 border border-slate-600 font-mono text-sm mb-4">
       <label class="block text-sm font-medium text-slate-300 mb-2">Additional context (optional)</label>
       <textarea id="additionalContext" rows="4" placeholder="Paste team updates, meeting notes, exclusions, or any extra context to include when generating the report. Max ~3000 characters." class="w-full bg-slate-700 rounded-lg p-3 border border-slate-600 text-sm mb-4"></textarea>
       <div class="flex gap-3">
         <button type="button" id="btnFetch" class="px-6 py-3 bg-slate-600 hover:bg-slate-500 rounded-lg font-medium">Fetch tickets only</button>
-        <button type="button" id="btnGenerate" class="px-6 py-3 bg-teal-600 hover:bg-teal-500 rounded-lg font-medium">Generate report (.docx)</button>
+        <button type="button" id="btnGenerate" class="px-6 py-3 bg-teal-600 hover:bg-teal-500 rounded-lg font-medium">Generate report &amp; create Gmail draft</button>
       </div>
       <div id="status" class="mt-3 text-sm text-slate-400"></div>
     </div>
@@ -630,6 +676,13 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <div id="fetchResult" class="hidden bg-slate-800 rounded-xl p-4 mb-4 overflow-auto max-h-96">
       <h3 class="font-bold mb-2">Fetched summary</h3>
       <pre id="fetchPre" class="text-xs text-slate-300 whitespace-pre-wrap"></pre>
+    </div>
+
+    <div id="previewSection" class="hidden bg-white rounded-xl mb-4">
+      <div class="bg-slate-800 rounded-t-xl px-4 py-2 flex justify-between items-center">
+        <span class="font-bold text-sm">Email Preview</span>
+      </div>
+      <iframe id="previewFrame" class="w-full rounded-b-xl" style="height:600px;border:none;"></iframe>
     </div>
   </div>
 
@@ -639,10 +692,14 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     function getPayload() {
       const youtrackRaw = (document.getElementById('youtrackIds').value || '').trim().split(/[\\n,;]/).map(function(s) { return s.trim(); }).filter(Boolean);
       const adoRaw = (document.getElementById('adoUrls').value || '').trim().split(/[\\n,;]/).map(function(s) { return s.trim(); }).filter(Boolean);
+      const chatSpaces = (document.getElementById('chatSpaces').value || '').trim();
+      const chatAfterDate = (document.getElementById('chatAfterDate').value || '').trim();
       return {
         reportDate: document.getElementById('reportDate').value.trim(),
         youtrackIds: youtrackRaw,
         adoUrls: adoRaw,
+        chatSpaces: chatSpaces || undefined,
+        chatAfterDate: chatAfterDate || undefined,
         additionalContext: (document.getElementById('additionalContext').value || '').trim()
       };
     }
@@ -681,13 +738,19 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           var err = await res.json().catch(function() { return {}; });
           throw new Error(err.error || res.statusText);
         }
-        var blob = await res.blob();
-        var a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = res.headers.get('Content-Disposition')?.split('filename=')[1]?.replace(/\"/g, '') || 'biweekly-report.docx';
-        a.click();
-        URL.revokeObjectURL(a.href);
-        document.getElementById('status').textContent = 'Report downloaded.';
+        var data = await res.json();
+        var statusEl = document.getElementById('status');
+        if (data.draftUrl && !data.draftError) {
+          statusEl.innerHTML = '✅ Gmail draft created — <a href="' + data.draftUrl + '" target="_blank" style="color:#5eead4;">Open in Gmail</a>';
+        } else {
+          var msg = '✅ Report generated.';
+          if (data.draftError) msg += ' (Gmail draft failed: ' + data.draftError + ')';
+          statusEl.textContent = msg;
+        }
+        if (data.htmlPreview) {
+          document.getElementById('previewFrame').srcdoc = data.htmlPreview;
+          document.getElementById('previewSection').classList.remove('hidden');
+        }
       } catch (e) {
         document.getElementById('status').textContent = 'Error: ' + e.message;
       }

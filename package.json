@@ -11,7 +11,7 @@
     "dev:ado": "node --watch server.js",
     "dev:youtrack": "node --watch youtrack.js",
     "dev:report": "node --watch biweekly-report.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test gchat.test.js"
   },
   "keywords": [],
   "author": "",
