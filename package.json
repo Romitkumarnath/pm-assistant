@@ -18,6 +18,8 @@
   "license": "ISC",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
+    "@google/genai": "^1.50.0",
+    "airtable": "^0.12.2",
     "axios": "^1.13.2",
     "docx": "^9.5.1",
     "dotenv": "^17.2.3",
